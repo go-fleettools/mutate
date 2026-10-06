@@ -36,6 +36,18 @@ jobs:
         # restore-on-interrupt path in particular is POSIX-shaped.
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # ⛔ bash ON EVERY LANE, not per step. GitHub's default shell on Windows
+    # is PowerShell, where `CGO_ENABLED=0 go build` is a syntax error and
+    # not a variable assignment:
+    #
+    #   CGO_ENABLED=0: D:\a\_temp\….ps1:2
+    #
+    # Setting `shell: bash` on the one step that obviously needed it left
+    # the next step to fail for a different reason, and the second failure
+    # looked like the first one not being fixed.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -50,7 +62,6 @@ jobs:
         run: |
           drift=$(gofmt -l .)
           if [ -n "$drift" ]; then echo "::error::not gofmt-clean:"; echo "$drift"; exit 1; fi
-        shell: bash
       - name: build
         run: CGO_ENABLED=0 go build ./...
       - name: vet
