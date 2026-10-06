@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,22 +111,75 @@ func TestTheFileIsAlwaysRestored(t *testing.T) {
 
 // A mutant that does not COMPILE is not a failing test, it is no test at
 // all — and in a grep for FAIL the two look identical. I read one as the
-// other during this session's bk work.
+// other during the session this tool came out of.
+//
+// Driven through a HELPER PROCESS — this test binary, re-invoked — rather
+// than through a shell script. The first version wrote a `.sh` and chmod'd
+// it, which Windows cannot execute: the command failed to START, mutate
+// read that as the command failing, and reported a mutation as caught. The
+// test was wrong about the platform, not the tool, and it took the
+// windows-latest lane to say so.
 func TestAMutantThatDoesNotCompileIsNotAPass(t *testing.T) {
 	dir := t.TempDir()
 	p := write(t, dir, "x.go", "package x\n")
-	// `false` would normally read as "caught"; the build-failure output
-	// must override that.
-	sh := write(t, dir, "fake.sh", "#!/bin/sh\necho '# example [build failed]'\nexit 1\n")
-	if err := os.Chmod(sh, 0o755); err != nil {
+
+	self, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	code, _, errb := runMutate(t, "-file", p, "-from", "package x", "-to", "package y", "--", sh)
+	// Set HERE, so the subprocess inherits it: mutate runs the command
+	// with this process's environment, which is the whole mechanism.
+	t.Setenv("MUTATE_HELPER", "1")
+	// `false` would normally read as "caught"; the build-failure output has
+	// to override that.
+	code, _, errb := runMutate(t, "-file", p, "-from", "package x", "-to", "package y",
+		"--", self, "-test.run", "TestHelperEmitsABuildFailure")
 	if code != 2 {
 		t.Errorf("code=%d, want 2 (not 0: a compile error is not a caught mutation)", code)
 	}
 	if !strings.Contains(errb, "DID NOT COMPILE") || !strings.Contains(errb, "proves nothing") {
 		t.Errorf("stderr=%q", errb)
+	}
+}
+
+// TestHelperEmitsABuildFailure is not a test: it is the command the test
+// above runs. It prints what `go build` prints when a package will not
+// compile, and fails — which is exactly the pair mutate must not read as a
+// caught mutation.
+//
+// Guarded by an environment variable so it does nothing during an ordinary
+// `go test ./...`; the helper-process pattern os/exec's own tests use.
+func TestHelperEmitsABuildFailure(t *testing.T) {
+	if os.Getenv("MUTATE_HELPER") == "" {
+		t.Skip("not a test: the subprocess for TestAMutantThatDoesNotCompileIsNotAPass")
+	}
+	fmt.Println("# example [build failed]")
+	os.Exit(1)
+}
+
+// And the classification on its own, with no process at all: these are the
+// strings that decide whether a run is reported as a failing test or as no
+// test at all.
+func TestLooksLikeBuildFailure(t *testing.T) {
+	for _, yes := range []string{
+		"# example [build failed]",
+		"./x.go:4:2: undefined: foo",
+		"./x.go:9:1: syntax error: unexpected name",
+		"./x.go:3:5: declared and not used: n",
+		"build constraints exclude all Go files in .",
+	} {
+		if !looksLikeBuildFailure(yes) {
+			t.Errorf("not recognised as a build failure: %q", yes)
+		}
+	}
+	for _, no := range []string{
+		"--- FAIL: TestThing (0.00s)\n    x_test.go:12: want 2, got 1\nFAIL",
+		"ok  \texample\t0.1s",
+		"",
+	} {
+		if looksLikeBuildFailure(no) {
+			t.Errorf("a test result was read as a build failure: %q", no)
+		}
 	}
 }
 
