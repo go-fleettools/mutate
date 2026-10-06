@@ -1,0 +1,110 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # ⛔ A WORKFLOW THAT FAILS TO PARSE REPORTS NOTHING AT ALL — no red cross, no
+  # jobs, and `gh pr checks` answers "no checks reported on the branch", which
+  # reads exactly like a check that has not started yet. actionlint is the only
+  # thing that catches it, so it is the first lane. (Same reasoning, and the
+  # same incident, as go-fleettools/fleettools.)
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+  test:
+    name: build + vet + test
+    strategy:
+      fail-fast: false
+      matrix:
+        # This tool edits files, spawns processes and traps signals — three
+        # things whose behaviour differs by operating system, and the one
+        # place a "works here" would be least surprising and most wrong. The
+        # restore-on-interrupt path in particular is POSIX-shaped.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # ⛔ bash ON EVERY LANE, not per step. GitHub's default shell on Windows
+    # is PowerShell, where `CGO_ENABLED=0 go build` is a syntax error and
+    # not a variable assignment:
+    #
+    #   CGO_ENABLED=0: D:\a\_temp\….ps1:2
+    #
+    # Setting `shell: bash` on the one step that obviously needed it left
+    # the next step to fail for a different reason, and the second failure
+    # looked like the first one not being fixed.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      # ⛔ SAY WHICH TOOLCHAIN RAN. A green check that does not record the
+      # compiler behind it makes every figure measured under it
+      # unattributable.
+      - run: go version
+      - name: gofmt
+        run: |
+          drift=$(gofmt -l .)
+          if [ -n "$drift" ]; then echo "::error::not gofmt-clean:"; echo "$drift"; exit 1; fi
+      - name: build
+        run: CGO_ENABLED=0 go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race -timeout 5m ./...
+
+  # The tool's whole claim is that it can tell a caught mutation from a
+  # surviving one. Asserting that against ITSELF, end to end through the
+  # built binary, is cheap and is the only check that exercises the
+  # argument parsing, the exit codes and the restore together.
+  selfcheck:
+    name: it catches a mutation in itself
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build
+        run: go build -o /tmp/mutate .
+      - name: a real mutation is caught
+        run: |
+          set -euo pipefail
+          # Break the ambiguity guard; the test that covers it must go red,
+          # so mutate must exit 0.
+          /tmp/mutate -file main.go -name "the ambiguity guard" \
+            -from 'return nil, fmt.Errorf("%s: the text to replace appears %d times — make it unique", path, n)' \
+            -to 'break' \
+            -- go test -run TestAnAmbiguousMutationIsRefused -count=1 .
+      - name: a mutation nothing covers is reported, not hidden
+        run: |
+          set -euo pipefail
+          # A comment is not behaviour: nothing should go red, so mutate must
+          # exit 1 and say the suite survived it.
+          if /tmp/mutate -file main.go -name "a comment" \
+               -from '// mutation holds the original bytes' \
+               -to '// mutation keeps the original bytes' \
+               -- go test -run TestUsage -count=1 . ; then
+            echo "::error::a change nothing covers was reported as caught"; exit 1
+          fi
+      - name: the file is restored
+        run: |
+          set -euo pipefail
+          git diff --exit-code || { echo "::error::a mutation was left in the tree"; exit 1; }
