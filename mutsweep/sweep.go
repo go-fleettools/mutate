@@ -75,6 +75,14 @@ func one(cfg config, g guard, cmd []string) result {
 		"--",
 	}, cmd...)
 
+	// The bytes as they are now, so a restore cannot depend on finding text.
+	// It must not: when a guard's text is unique the replacement is EMPTY, and
+	// putting it back by matching that empty string inserts the guard at the
+	// start of the file. Windows showed it, because there mutate was not asked
+	// politely enough to restore the file itself and this ran for real.
+	path := filepath.Join(runIn, g.pathFrom(runIn))
+	before, readErr := os.ReadFile(path)
+
 	start := time.Now()
 	c := exec.Command(cfg.mutate, argv...)
 	c.Env = append(os.Environ(), active+"=1")
@@ -98,7 +106,7 @@ func one(cfg config, g guard, cmd []string) result {
 		// depending on another process having managed that is a hope: the
 		// window where a source file holds a deliberate defect must not outlive
 		// the sweep.
-		if err := ensureRestored(runIn, g); err != nil {
+		if err := ensureRestored(path, before, readErr); err != nil {
 			r.note += "; " + err.Error()
 		}
 	case err == nil:
@@ -213,23 +221,24 @@ func runBounded(ctx context.Context, c *exec.Cmd) ([]byte, error) {
 	}
 }
 
-// ensureRestored puts the guard back if the mutation outlived the process that
-// was supposed to undo it.
-func ensureRestored(runIn string, g guard) error {
-	path := filepath.Join(runIn, g.pathFrom(runIn))
-	src, err := os.ReadFile(path)
+// ensureRestored writes the file back as it was, if it is not already.
+//
+// By BYTES, never by matching text: the replacement for a uniquely spelled
+// guard is the empty string, and restoring by matching that inserts the guard
+// wherever the empty string is first "found", which is offset zero.
+func ensureRestored(path string, before []byte, readErr error) error {
+	if readErr != nil {
+		return fmt.Errorf("RESTORE IMPOSSIBLE: %s was never read: %v", path, readErr)
+	}
+	now, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("cannot check %s: %w", path, err)
+		return fmt.Errorf("RESTORE IMPOSSIBLE: cannot read %s: %v", path, err)
 	}
-	if strings.Contains(string(src), g.from) {
-		return nil // never applied, or already restored
+	if bytes.Equal(now, before) {
+		return nil
 	}
-	if !strings.Contains(string(src), g.to) {
-		return fmt.Errorf("RESTORE IMPOSSIBLE: %s holds neither the guard nor the mutation", path)
-	}
-	fixed := strings.Replace(string(src), g.to, g.from, 1)
-	if err := os.WriteFile(path, []byte(fixed), 0o644); err != nil {
+	if err := os.WriteFile(path, before, 0o644); err != nil {
 		return fmt.Errorf("RESTORE FAILED for %s: %w", path, err)
 	}
-	return fmt.Errorf("the mutation outlived mutate and was restored here")
+	return fmt.Errorf("the mutation outlived mutate and was put back here")
 }

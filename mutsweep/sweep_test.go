@@ -274,3 +274,97 @@ func Wait(n int) {
 		t.Fatalf("the file was left mutated after the sweep gave up:\n%s", after)
 	}
 }
+
+// The restore must not depend on the mutating process cleaning up after
+// itself, and must not be done by matching text.
+//
+// Both were learned on Windows, where taskkill without /F does not stop a
+// console program: mutate never restored, the sweep's own restore ran for the
+// first time -- and corrupted the file, because a uniquely spelled guard is
+// replaced by the EMPTY string, and putting it back by matching that inserts it
+// at offset zero. The file came back as "if n <= 0 {...}" followed by
+// "package x".
+//
+// This reproduces that on any platform with a stand-in for mutate that applies
+// the replacement, ignores being asked to stop, and sleeps.
+func TestTheFileComesBackEvenIfNothingElseRestoresIt(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module x\n\ngo 1.27.1\n")
+	const src = `package x
+
+func Wait(n int) {
+	if n <= 0 {
+		return
+	}
+	select {}
+}
+`
+	write(t, dir, "x.go", src)
+	write(t, dir, "x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestReturns(t *testing.T) { Wait(0) }\n")
+
+	gs, err := collect(config{dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := one(config{dir: dir, timeout: 2 * time.Second, mutate: buildStubborn(t)}, gs[0],
+		[]string{"go", "test", "./..."})
+	if got.verdict != hung {
+		t.Fatalf("verdict %q (%s), want %q", got.verdict, got.note, hung)
+	}
+	if !strings.Contains(got.note, "put back here") {
+		t.Errorf("the note does not say the sweep restored it: %q", got.note)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "x.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != src {
+		t.Fatalf("the file did not come back as it was:\n%s", after)
+	}
+}
+
+// buildStubborn compiles a stand-in for mutate that applies the replacement,
+// refuses to be asked to stop, and then sleeps.
+func buildStubborn(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	const prog = `package main
+
+import (
+	"flag"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+)
+
+func main() {
+	file := flag.String("file", "", "")
+	from := flag.String("from", "", "")
+	to := flag.String("to", "", "")
+	flag.String("name", "", "")
+	flag.Parse()
+	b, err := os.ReadFile(*file)
+	if err != nil {
+		os.Exit(2)
+	}
+	_ = os.WriteFile(*file, []byte(strings.Replace(string(b), *from, *to, 1)), 0o644)
+	signal.Ignore(syscall.SIGTERM, syscall.SIGINT)
+	time.Sleep(time.Hour)
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(prog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module stubborn\n\ngo 1.27.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "stubborn"+exeSuffix())
+	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("building the stand-in: %v\n%s", err, out)
+	}
+	return bin
+}
