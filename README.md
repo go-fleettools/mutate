@@ -48,6 +48,32 @@ Over five runs on one project it put **574 guards** through that and found
 **thirteen** no test held — including a decoder that panics on a peer's
 bytes once its bound is gone.
 
+### Answering a report: `-only`
+
+A sweep is the slow half. The half that happens over and over is the other one:
+the report names survivors, tests get written for them, and the question becomes
+whether those tests *kill* them — which is not the same question as whether they
+pass. A test can be green because it holds the guard, or green because it never
+reaches it.
+
+```console
+$ mutsweep -only blob.go:347,cell.go:98 -- go test -count 1 ./...
+mutsweep: 2 refusals, 5m0s each at most, through "go test -count 1 ./..."
+[1/2] caught       blob.go:347  used <= 0  11s
+[2/2] caught       cell.go:98   !ok  10s
+
+2 refusals: 2 caught, 0 not mutants, 0 survived, 0 hung
+```
+
+Targets are spelled exactly as the report prints them, and `-only` reads only the
+files it was given, so the answer costs seconds where the sweep cost tens of
+minutes.
+
+**A target that matches no refusal is an error naming the target.** An `-only`
+list is written from a report and goes stale two ways — the file is edited after
+the report, or the line is mistyped — and both otherwise end as a sweep of
+nothing, which is the one result that reads like a clean one.
+
 ### Four verdicts, because two is not enough
 
 | verdict | meaning |
