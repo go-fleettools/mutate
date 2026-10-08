@@ -61,6 +61,32 @@ bytes once its bound is gone.
 is honourable does not fail a suite; it makes the suite wait out an hour
 somebody mistyped into the wrong field.
 
+### The taxonomy is not invented here
+
+PIT, the mutation testing tool for Java, has reported these outcomes for years,
+and four of them are the four above under other names
+([pitest.org, *Basic concepts*](https://pitest.org/quickstart/basic_concepts)):
+
+| PIT | here | PIT's definition |
+| --- | --- | --- |
+| Killed | caught | "A test caught the mutation successfully." |
+| Survived | SURVIVED | "The mutation was not detected by the covering test." |
+| Timed Out | HUNG | "A mutation may time out if it causes an infinite loop, such as removing the increment from a counter in a for loop." |
+| Non viable | not a mutant | "could not be loaded by the JVM as the bytecode was in some way invalid" |
+| Run error | NOT RUN | "something went wrong when trying to test the mutation" |
+
+Arriving at the same five independently is some evidence they are the joints of
+the thing rather than this tool's habits. PIT has two more that this does not:
+**No coverage**, which it can report because it knows which tests cover each
+line, and **Memory error**. Neither is available here, and a sweep that cannot
+tell "no test covers this line" from "the tests covered it and said nothing"
+should not pretend otherwise — in Go both arrive as a green suite.
+
+Whether PIT counts a timed-out mutant as killed in its score, that page does not
+say. Here it is kept apart deliberately: a suite that notices only by failing to
+return names no cause, costs a runner its whole budget, and on a loaded machine
+is indistinguishable from slowness.
+
 ### What it refuses to do
 
 **Run inside another sweep.** A sweep runs a command of somebody's choosing,
