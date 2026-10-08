@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -74,14 +76,15 @@ func one(cfg config, g guard, cmd []string) result {
 	}, cmd...)
 
 	start := time.Now()
-	c := exec.CommandContext(ctx, cfg.mutate, argv...)
+	c := exec.Command(cfg.mutate, argv...)
 	c.Env = append(os.Environ(), active+"=1")
 	// The package under test is where the command has to run: `go test ./...`
 	// means nothing from the sweeping tool's own directory, and the first
 	// version of this reported every mutant "caught" in zero seconds because
 	// the command failed before it ever reached the package.
 	c.Dir = runIn
-	out, err := c.CombinedOutput()
+	ownGroup(c)
+	out, err := runBounded(ctx, c)
 	took := time.Since(start)
 
 	r := result{guard: g, took: took}
@@ -91,6 +94,13 @@ func one(cfg config, g guard, cmd []string) result {
 		// finish without it. Not caught either, because nothing SAYS so -- a
 		// timeout names no cause and costs a runner its whole budget.
 		r.verdict, r.note = hung, fmt.Sprintf("no answer in %v", cfg.timeout)
+		// And the file must be back. mutate restores it when asked to stop, and
+		// depending on another process having managed that is a hope: the
+		// window where a source file holds a deliberate defect must not outlive
+		// the sweep.
+		if err := ensureRestored(runIn, g); err != nil {
+			r.note += "; " + err.Error()
+		}
 	case err == nil:
 		r.verdict, r.note = caught, took.Round(time.Second).String()
 	case strings.Contains(string(out), "DID NOT COMPILE"):
@@ -173,4 +183,53 @@ func trim(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+// runBounded runs the command and, if the context ends first, kills what it
+// started rather than only the command itself.
+//
+// exec.CommandContext would kill the direct child alone, leaving the `go test`
+// that mutate spawned to hold its temporary directory and outlive the sweep.
+func runBounded(ctx context.Context, c *exec.Cmd) ([]byte, error) {
+	var buf bytes.Buffer
+	c.Stdout, c.Stderr = &buf, &buf
+	if err := c.Start(); err != nil {
+		return buf.Bytes(), err
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	select {
+	case err := <-done:
+		return buf.Bytes(), err
+	case <-ctx.Done():
+		killTree(c)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			hardKill(c)
+			<-done
+		}
+		return buf.Bytes(), ctx.Err()
+	}
+}
+
+// ensureRestored puts the guard back if the mutation outlived the process that
+// was supposed to undo it.
+func ensureRestored(runIn string, g guard) error {
+	path := filepath.Join(runIn, g.pathFrom(runIn))
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("cannot check %s: %w", path, err)
+	}
+	if strings.Contains(string(src), g.from) {
+		return nil // never applied, or already restored
+	}
+	if !strings.Contains(string(src), g.to) {
+		return fmt.Errorf("RESTORE IMPOSSIBLE: %s holds neither the guard nor the mutation", path)
+	}
+	fixed := strings.Replace(string(src), g.to, g.from, 1)
+	if err := os.WriteFile(path, []byte(fixed), 0o644); err != nil {
+		return fmt.Errorf("RESTORE FAILED for %s: %w", path, err)
+	}
+	return fmt.Errorf("the mutation outlived mutate and was restored here")
 }

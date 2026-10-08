@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -230,5 +231,46 @@ func TestAMutateThatCannotRunIsNotAVerdictAboutTheCode(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "never ran") {
 		t.Errorf("the summary does not say they never ran: %q", errOut.String())
+	}
+}
+
+// A sweep that gives up on a mutant must leave the source as it found it.
+//
+// mutate restores the file when it is interrupted, so the sweep asks before it
+// kills -- and checks afterwards, because depending on another process having
+// managed that is a hope. Measured before this existed: after a HUNG verdict
+// the file still held the deliberate defect, which is the exact failure mutate
+// was written to prevent, reintroduced by the thing driving it.
+func TestTheFileComesBackAfterAHang(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module x\n\ngo 1.27.1\n")
+	const src = `package x
+
+func Wait(n int) {
+	if n <= 0 {
+		return
+	}
+	select {}
+}
+`
+	write(t, dir, "x.go", src)
+	write(t, dir, "x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestReturns(t *testing.T) { Wait(0) }\n")
+
+	gs, err := collect(config{dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := one(config{dir: dir, timeout: 3 * time.Second, mutate: buildMutate(t)}, gs[0],
+		[]string{"go", "test", "./..."})
+	if got.verdict != hung {
+		t.Fatalf("verdict %q (%s), want %q -- this test is about what happens after a hang",
+			got.verdict, got.note, hung)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "x.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != src {
+		t.Fatalf("the file was left mutated after the sweep gave up:\n%s", after)
 	}
 }
