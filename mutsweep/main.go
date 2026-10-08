@@ -46,7 +46,8 @@
 //	mutsweep -only list.go:143,list.go:483 -- go test -count 1 ./...
 //
 // -only takes the targets exactly as a report prints them and sweeps those and
-// nothing else, which turns tens of minutes into seconds. A target that matches
+// nothing else: one run of the command per target, rather than one per refusal
+// in the package. A target that matches
 // no refusal is an error naming the target: the two ways an -only list goes
 // stale are the file moving on and the line being mistyped, and both otherwise
 // end as a sweep of nothing that reads like a clean one.

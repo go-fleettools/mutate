@@ -65,8 +65,8 @@ func parse(argv []string, stderr io.Writer) (config, []string, int) {
 	files := fs.String("files", "", "comma-separated files to sweep; default is every non-test .go in -dir")
 	only := fs.String("only", "", "comma-separated `file.go:line` refusals to sweep, spelled as a report prints\n"+
 		"them. For re-running exactly the survivors of an earlier sweep once tests have\n"+
-		"been written for them: a full sweep of a package is tens of minutes, the\n"+
-		"survivors are seconds. A target matching no refusal is an error, because a\n"+
+		"been written for them: one run of the command per target, rather than one per\n"+
+		"refusal in the package. A target matching no refusal is an error, because a\n"+
 		"sweep that quietly swept nothing reads as a clean one")
 	fs.DurationVar(&cfg.timeout, "timeout", 5*time.Minute, "how long one mutant may run before it is called HUNG")
 	fs.StringVar(&cfg.mutate, "mutate", "mutate", "the mutate command to drive")
