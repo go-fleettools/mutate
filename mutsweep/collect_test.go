@@ -186,7 +186,7 @@ func uvarint(b []byte) (int, int) { return 0, len(b) }
 // COMMAND and not about a directory: a path check would miss every other way
 // the command can reach back here.
 func TestANestedSweepRefusesToStart(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "mutsweep")
+	bin := filepath.Join(t.TempDir(), "mutsweep"+exeSuffix())
 	build := exec.Command("go", "build", "-o", bin, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("building the tool: %v\n%s", err, out)

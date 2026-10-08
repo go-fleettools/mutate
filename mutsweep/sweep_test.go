@@ -3,6 +3,7 @@ package main
 import (
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -178,13 +179,56 @@ func TestReportExitsOnWhatNeedsReading(t *testing.T) {
 	}
 }
 
+// exeSuffix is what this platform needs on an executable it will run: Windows
+// will not start a file without it, and `go build -o` does not add one.
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
 // buildMutate compiles the command at the repository root and returns its path.
 func buildMutate(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "mutate")
+	bin := filepath.Join(t.TempDir(), "mutate"+exeSuffix())
 	cmd := exec.Command("go", "build", "-o", bin, "..")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building mutate from this repository: %v\n%s", err, out)
 	}
 	return bin
+}
+
+// "mutate could not be started" is a statement about this machine, not about
+// the code under test. Windows CI said it first, and said it as "not a mutant"
+// with an empty note: the binary had been built without the extension Windows
+// needs, so nothing ran and every guard read as unmutable.
+func TestAMutateThatCannotRunIsNotAVerdictAboutTheCode(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module x\n\ngo 1.27.1\n")
+	write(t, dir, "x.go", "package x\n\nimport \"errors\"\n\nvar e = errors.New(\"no\")\n\nfunc F(n int) error {\n\tif n < 0 {\n\t\treturn e\n\t}\n\treturn nil\n}\n")
+	write(t, dir, "x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestF(t *testing.T) {\n\tif F(1) != nil {\n\t\tt.Fatal(\"refused a positive\")\n\t}\n}\n")
+
+	gs, err := collect(config{dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := one(config{dir: dir, timeout: 30 * time.Second, mutate: filepath.Join(dir, "no-such-mutate")},
+		gs[0], []string{"go", "test", "./..."})
+	if got.verdict != unrun {
+		t.Fatalf("verdict %q (%s), want %q", got.verdict, got.note, unrun)
+	}
+	if !strings.Contains(got.note, "could not run") {
+		t.Errorf("the note does not say what happened: %q", got.note)
+	}
+
+	// And a run that could not run fails the summary, rather than passing as a
+	// sweep in which nothing survived.
+	var out, errOut strings.Builder
+	if code := report([]result{{verdict: caught}, got}, &out, &errOut); code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if !strings.Contains(errOut.String(), "never ran") {
+		t.Errorf("the summary does not say they never ran: %q", errOut.String())
+	}
 }

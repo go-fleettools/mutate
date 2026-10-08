@@ -19,7 +19,8 @@ const (
 	caught   verdict = "caught"   // the suite went red: the guard is held
 	survived verdict = "SURVIVED" // the suite stayed green: nothing holds it
 	noBuild  verdict = "not a mutant"
-	hung     verdict = "HUNG" // no answer in time: held, but only by a timeout
+	unrun    verdict = "NOT RUN" // mutate itself could not be started
+	hung     verdict = "HUNG"    // no answer in time: held, but only by a timeout
 )
 
 type result struct {
@@ -96,6 +97,12 @@ func one(cfg config, g guard, cmd []string) result {
 		r.verdict, r.note = noBuild, firstBuildError(string(out))
 	case exitCode(err) == 1:
 		r.verdict, r.note = survived, took.Round(time.Second).String()
+	case exitCode(err) < 0:
+		// The command never started: a missing binary, the wrong name on a
+		// platform that wants an extension. Calling that "not a mutant" would
+		// read as a statement about the code, and it is a statement about this
+		// machine -- Windows CI said it first, with an empty note.
+		r.verdict, r.note = unrun, fmt.Sprintf("could not run %q: %v", cfg.mutate, err)
 	default:
 		r.verdict, r.note = noBuild, trim(strings.TrimSpace(lastLine(string(out))), 70)
 	}
@@ -109,6 +116,9 @@ func report(rs []result, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "\n%d refusals: %d caught, %d not mutants, %d survived, %d hung\n",
 		len(rs), counts[caught], counts[noBuild], counts[survived], counts[hung])
+	if n := counts[unrun]; n > 0 {
+		fmt.Fprintf(stderr, "::error::%d of them never ran: the mutate command could not be started\n", n)
+	}
 
 	// The two that need reading are listed again, because a line in the middle
 	// of several hundred is a line nobody sees.
@@ -117,6 +127,9 @@ func report(rs []result, stdout, stderr io.Writer) int {
 		if r.verdict == survived || r.verdict == hung {
 			needed = append(needed, r)
 		}
+	}
+	if counts[unrun] > 0 {
+		return 1
 	}
 	if len(needed) == 0 {
 		return 0
