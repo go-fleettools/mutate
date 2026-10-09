@@ -35,6 +35,22 @@
 // each one in turn through `mutate`, and prints a line per guard and a summary.
 // It exits non-zero when anything survived or hung, because those are the two
 // answers that need somebody to read them.
+//
+// # ANSWERING THE REPORT
+//
+// A sweep is the slow half. The fast half is the one that happens over and over:
+// a report names a handful of survivors, tests get written for them, and the
+// question is whether those tests actually kill them — which is not the same
+// question as whether they pass.
+//
+//	mutsweep -only list.go:143,list.go:483 -- go test -count 1 ./...
+//
+// -only takes the targets exactly as a report prints them and sweeps those and
+// nothing else: one run of the command per target, rather than one per refusal
+// in the package. A target that matches
+// no refusal is an error naming the target: the two ways an -only list goes
+// stale are the file moving on and the line being mistyped, and both otherwise
+// end as a sweep of nothing that reads like a clean one.
 package main
 
 import (

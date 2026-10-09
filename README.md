@@ -48,6 +48,43 @@ Over five runs on one project it put **574 guards** through that and found
 **thirteen** no test held — including a decoder that panics on a peer's
 bytes once its bound is gone.
 
+### Answering a report: `-only`
+
+A sweep is the slow half. The half that happens over and over is the other one:
+the report names survivors, tests get written for them, and the question becomes
+whether those tests *kill* them — which is not the same question as whether they
+pass. A test can be green because it holds the guard, or green because it never
+reaches it.
+
+```console
+$ mutsweep -only map.go:163,map.go:628,map.go:856,map.go:861,map.go:1002 \
+      -timeout 2m -- go test -count 1 ./...
+mutsweep: 5 refusals, 2m0s each at most, through "go test -count 1 ./..."
+[1/5] caught       map.go:163  op.Kind != MapSet && op.Kind != MapDelete && op.Kind != Map…  15s
+[2/5] HUNG         map.go:628  last-had > uint64(len(m.pending))  no answer in 2m0s
+[3/5] caught       map.go:856  !ok || below > MaxClock  14s
+[4/5] SURVIVED     map.go:861  !ok  13s
+[5/5] SURVIVED     map.go:1002  len(b) == 0  14s
+
+5 refusals: 2 caught, 0 not mutants, 2 survived, 1 hung
+```
+
+That is a real run, and it is the answer to a report: those five lines were
+survivors of a 204-refusal sweep that took half an hour, tests were written for
+three of them, and this re-asked the question in three minutes. It says the two
+tests land, that the two left alone are still unheld — on purpose, each being the
+same value by another line — and that one guard still has no answer at all.
+
+Targets are spelled exactly as the report prints them, and `-only` reads only the
+files it was given. The cost is one run of the command per target — about fifteen
+seconds each here, plus whatever a `HUNG` one waits out — against a whole sweep's
+half hour.
+
+**A target that matches no refusal is an error naming the target.** An `-only`
+list is written from a report and goes stale two ways — the file is edited after
+the report, or the line is mistyped — and both otherwise end as a sweep of
+nothing, which is the one result that reads like a clean one.
+
 ### Four verdicts, because two is not enough
 
 | verdict | meaning |

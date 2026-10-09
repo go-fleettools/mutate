@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,9 +20,19 @@ type config struct {
 	dir     string // where the files to mutate are
 	runIn   string // where the command runs; often the module root above dir
 	files   []string
+	only    []target
 	timeout time.Duration
 	mutate  string
 }
+
+// target names one refusal the way a report prints it: the file as -files
+// spells it, and the line the guard starts on.
+type target struct {
+	file string
+	line int
+}
+
+func (t target) String() string { return fmt.Sprintf("%s:%d", t.file, t.line) }
 
 // guard is one `if` that refuses something: the exact bytes to delete, and
 // enough to name it in a report.
@@ -52,6 +63,11 @@ func parse(argv []string, stderr io.Writer) (config, []string, int) {
 		"subpackage cannot see a test that lives above it, and a guard those tests hold\n"+
 		"would be reported as surviving")
 	files := fs.String("files", "", "comma-separated files to sweep; default is every non-test .go in -dir")
+	only := fs.String("only", "", "comma-separated `file.go:line` refusals to sweep, spelled as a report prints\n"+
+		"them. For re-running exactly the survivors of an earlier sweep once tests have\n"+
+		"been written for them: one run of the command per target, rather than one per\n"+
+		"refusal in the package. A target matching no refusal is an error, because a\n"+
+		"sweep that quietly swept nothing reads as a clean one")
 	fs.DurationVar(&cfg.timeout, "timeout", 5*time.Minute, "how long one mutant may run before it is called HUNG")
 	fs.StringVar(&cfg.mutate, "mutate", "mutate", "the mutate command to drive")
 	if err := fs.Parse(argv); err != nil {
@@ -60,15 +76,42 @@ func parse(argv []string, stderr io.Writer) (config, []string, int) {
 	if *files != "" {
 		cfg.files = strings.Split(*files, ",")
 	}
+	if *only != "" {
+		var err error
+		if cfg.only, err = parseTargets(*only); err != nil {
+			fmt.Fprintln(stderr, "mutsweep:", err)
+			return cfg, nil, 2
+		}
+	}
 	if cfg.runIn == "" {
 		cfg.runIn = cfg.dir
 	}
 	cmd := fs.Args()
 	if len(cmd) == 0 {
-		fmt.Fprintln(stderr, "usage: mutsweep [-dir D] [-files a.go,b.go] [-timeout 5m] -- command...")
+		fmt.Fprintln(stderr, "usage: mutsweep [-dir D] [-files a.go,b.go] [-only a.go:12,...] [-timeout 5m] -- command...")
 		return cfg, nil, 2
 	}
 	return cfg, cmd, 0
+}
+
+// parseTargets reads the -only list. A target it cannot read is an error here
+// rather than a target that matches nothing later, so the message names the
+// spelling rather than the consequence.
+func parseTargets(s string) ([]target, error) {
+	var out []target
+	for _, field := range strings.Split(s, ",") {
+		field = strings.TrimSpace(field)
+		at := strings.LastIndexByte(field, ':')
+		if at <= 0 || at == len(field)-1 {
+			return nil, fmt.Errorf("-only %q: each target is file.go:line", field)
+		}
+		line, err := strconv.Atoi(field[at+1:])
+		if err != nil || line <= 0 {
+			return nil, fmt.Errorf("-only %q: %q is not a line number", field, field[at+1:])
+		}
+		out = append(out, target{file: field[:at], line: line})
+	}
+	return out, nil
 }
 
 // collect finds every refusal guard in the chosen files.
@@ -79,6 +122,18 @@ func parse(argv []string, stderr io.Writer) (config, []string, int) {
 // being reported.
 func collect(cfg config) ([]guard, error) {
 	paths := cfg.files
+	if len(paths) == 0 && len(cfg.only) > 0 {
+		// The targets name their files, so there is no reason to parse the rest
+		// of the package to throw it away.
+		seen := map[string]bool{}
+		for _, t := range cfg.only {
+			if !seen[t.file] {
+				seen[t.file] = true
+				paths = append(paths, t.file)
+			}
+		}
+		sort.Strings(paths)
+	}
 	if len(paths) == 0 {
 		entries, err := os.ReadDir(cfg.dir)
 		if err != nil {
@@ -153,6 +208,42 @@ func collect(cfg config) ([]guard, error) {
 			}
 			return true
 		})
+	}
+	if len(cfg.only) > 0 {
+		return keepOnly(out, cfg.only)
+	}
+	return out, nil
+}
+
+// keepOnly narrows a collection to the named refusals, and refuses a name that
+// matched nothing.
+//
+// The refusal is the point. A -only list is written from an earlier report, and
+// the two things that make one stale -- the file edited since, or the line
+// mistyped -- both end as a sweep of nothing. mutsweep already refuses an empty
+// collection, but it would say the walk is wrong when the walk is right and the
+// NAME is wrong, which sends the reader to the wrong place.
+func keepOnly(all []guard, want []target) ([]guard, error) {
+	found := make(map[target]bool, len(want))
+	var out []guard
+	for _, g := range all {
+		t := target{file: g.file, line: g.line}
+		for _, w := range want {
+			if w == t && !found[t] {
+				found[t] = true
+				out = append(out, g)
+			}
+		}
+	}
+	var missing []string
+	for _, w := range want {
+		if !found[w] {
+			missing = append(missing, w.String())
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("-only named %d refusal(s) that are not there: %s — the file has moved on, or the line is mistyped",
+			len(missing), strings.Join(missing, ", "))
 	}
 	return out, nil
 }

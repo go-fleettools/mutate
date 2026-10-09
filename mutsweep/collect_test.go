@@ -212,3 +212,164 @@ func TestANestedSweepRefusesToStart(t *testing.T) {
 		t.Errorf("it refuses even outside a sweep: %s", out2)
 	}
 }
+
+// -only narrows a collection to the refusals named, and nothing else.
+//
+// This is the loop a report puts somebody in: a sweep names survivors, tests
+// get written, and the question is whether those tests kill them -- which a
+// full sweep answers in tens of minutes and this answers in seconds.
+func TestOnlyKeepsExactlyWhatItNames(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.go", `package x
+
+import "errors"
+
+func One(n int) error {
+	if n < 0 {
+		return errors.New("one")
+	}
+	if n > 9 {
+		return errors.New("two")
+	}
+	return nil
+}
+`)
+	write(t, dir, "b.go", `package x
+
+import "errors"
+
+func Two(n int) error {
+	if n == 7 {
+		return errors.New("three")
+	}
+	return nil
+}
+`)
+
+	all, err := collect(config{dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("the control found %d refusals, want 3 -- the fixture is wrong, not -only", len(all))
+	}
+
+	// Name the second guard of a.go and the one in b.go, leaving the first out.
+	want := []target{{file: "a.go", line: all[1].line}, {file: "b.go", line: all[2].line}}
+	got, err := collect(config{dir: dir, only: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("-only kept %d refusals, want 2", len(got))
+	}
+	for i, g := range got {
+		if g.file != want[i].file || g.line != want[i].line {
+			t.Errorf("kept %s:%d, want %s", g.file, g.line, want[i])
+		}
+	}
+	if strings.Contains(got[0].cond, "n < 0") {
+		t.Error("-only kept the guard it was not given")
+	}
+}
+
+// A target that names no refusal is an error naming the target.
+//
+// Both ways an -only list goes stale -- the file edited since the report, the
+// line mistyped -- end as a collection of nothing. mutsweep already refuses an
+// empty collection, but its message says the WALK is wrong, which is the wrong
+// place to send somebody when the walk is right and the name is not.
+func TestOnlyRefusesATargetThatIsNotThere(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.go", `package x
+
+import "errors"
+
+func One(n int) error {
+	if n < 0 {
+		return errors.New("one")
+	}
+	return nil
+}
+`)
+	real, err := collect(config{dir: dir})
+	if err != nil || len(real) != 1 {
+		t.Fatalf("the control found %d refusals (%v), want 1", len(real), err)
+	}
+
+	// The control first: the line that IS there is kept, so what follows is
+	// about the missing line and not about -only refusing everything.
+	if got, err := collect(config{dir: dir, only: []target{{file: "a.go", line: real[0].line}}}); err != nil || len(got) != 1 {
+		t.Fatalf("the line that is there gave %d refusals (%v), want 1", len(got), err)
+	}
+
+	_, err = collect(config{dir: dir, only: []target{{file: "a.go", line: real[0].line + 100}}})
+	if err == nil {
+		t.Fatal("a line that holds no refusal was accepted, so a stale -only list would sweep nothing and look clean")
+	}
+	for _, want := range []string{"a.go", "not there"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal says %q, which does not name %q", err, want)
+		}
+	}
+}
+
+// -only says which files to read, so a package of a thousand files is not
+// parsed to answer a question about two of them.
+func TestOnlyNeedsNoFilesList(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.go", `package x
+
+import "errors"
+
+func One(n int) error {
+	if n < 0 {
+		return errors.New("one")
+	}
+	return nil
+}
+`)
+	// Unparseable, so reading it at all is a failure this test can see.
+	write(t, dir, "b.go", "package x\n\nthis is not Go\n")
+
+	got, err := collect(config{dir: dir, only: []target{{file: "a.go", line: 6}}})
+	if err != nil {
+		t.Fatalf("-only read a file it was not asked about: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("kept %d refusals, want 1", len(got))
+	}
+}
+
+// The spellings -only refuses, each for its own reason.
+func TestOnlyReadsItsTargets(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want []target
+	}{
+		{"a.go:12", []target{{"a.go", 12}}},
+		{"a.go:12,b/c.go:3", []target{{"a.go", 12}, {"b/c.go", 3}}},
+		{" a.go:12 , b.go:3 ", []target{{"a.go", 12}, {"b.go", 3}}},
+	} {
+		got, err := parseTargets(c.in)
+		if err != nil {
+			t.Errorf("%q: %v", c.in, err)
+			continue
+		}
+		if len(got) != len(c.want) {
+			t.Errorf("%q gave %v, want %v", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%q gave %v, want %v", c.in, got, c.want)
+				break
+			}
+		}
+	}
+	for _, bad := range []string{"a.go", "a.go:", ":12", "a.go:0", "a.go:-3", "a.go:x"} {
+		if _, err := parseTargets(bad); err == nil {
+			t.Errorf("%q was accepted, and would have matched nothing", bad)
+		}
+	}
+}
