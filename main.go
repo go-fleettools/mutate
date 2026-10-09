@@ -180,18 +180,66 @@ func (m *mutation) restore() {
 	}
 }
 
+// compilerSays are phrases the Go toolchain prints when a package will not
+// build. Every one of them is also a phrase a TEST may print, which is the
+// whole difficulty.
+var compilerSays = []string{
+	"build constraints exclude", "undefined:", "syntax error",
+	"declared and not used", "cannot use", "not enough arguments",
+	"too many arguments", "imported and not used",
+}
+
 // looksLikeBuildFailure distinguishes "the test failed" from "nothing ran".
+//
+// ⛔ It looks at WHERE the phrase appears, not merely whether it appears.
+// Searching the whole output got this wrong in the direction that costs most:
+// a go-odf test failed with
+//
+//	limits_test.go:85: it was refused by *xml.SyntaxError (XML syntax error …)
+//
+// and "syntax error" matched. A mutation the suite had CAUGHT — three tests
+// failed on it — was reported as "DID NOT COMPILE … this proves nothing",
+// which invites rewriting a mutation that was already working, or concluding a
+// guard is untested when it is not.
+//
+// The rule is the shape of the output rather than its words. `go test` prints
+// compiler errors UNINDENTED, under a "# package" header, before the summary;
+// everything a test itself says is indented, or carried on a line beginning
+// ---, ===, ok, PASS or FAIL. So a phrase only counts when it is on a line the
+// COMPILER could have written.
+//
+// "[build failed]" stays decisive wherever it is: it is the test runner's own
+// word for this, and it appears on a FAIL summary line.
 func looksLikeBuildFailure(out string) bool {
-	for _, s := range []string{
-		"[build failed]", "build constraints exclude", "undefined:",
-		"syntax error", "declared and not used", "cannot use",
-		"not enough arguments", "too many arguments", "imported and not used",
-	} {
-		if strings.Contains(out, s) {
-			return true
+	if strings.Contains(out, "[build failed]") {
+		return true
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if !compilerCouldHaveWritten(line) {
+			continue
+		}
+		for _, s := range compilerSays {
+			if strings.Contains(line, s) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// compilerCouldHaveWritten says whether a line is the toolchain speaking
+// rather than a test. Indented lines are a test's own output; the rest are the
+// runner's summary lines, which are recognisable by how they begin.
+func compilerCouldHaveWritten(line string) bool {
+	if line == "" || line[0] == ' ' || line[0] == '\t' {
+		return false
+	}
+	for _, p := range []string{"--- ", "=== ", "ok ", "ok\t", "PASS", "FAIL", "? ", "?\t"} {
+		if strings.HasPrefix(line, p) {
+			return false
+		}
+	}
+	return true
 }
 
 func firstLine(s string) string {
