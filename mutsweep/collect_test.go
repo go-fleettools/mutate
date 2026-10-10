@@ -59,7 +59,7 @@ func WithAnInitialiser() error {
 
 func do() error { return nil }
 `)
-	got, err := collect(config{dir: dir})
+	got, _, err := collect(config{dir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func Decode(a, b []byte) bool {
 
 func uvarint(b []byte) (int, int) { return 0, len(b) }
 `)
-	got, err := collect(config{dir: dir})
+	got, _, err := collect(config{dir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func Two(n int) error {
 }
 `)
 
-	all, err := collect(config{dir: dir})
+	all, _, err := collect(config{dir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func Two(n int) error {
 
 	// Name the second guard of a.go and the one in b.go, leaving the first out.
 	want := []target{{file: "a.go", line: all[1].line}, {file: "b.go", line: all[2].line}}
-	got, err := collect(config{dir: dir, only: want})
+	got, _, err := collect(config{dir: dir, only: want})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,18 +292,18 @@ func One(n int) error {
 	return nil
 }
 `)
-	real, err := collect(config{dir: dir})
+	real, _, err := collect(config{dir: dir})
 	if err != nil || len(real) != 1 {
 		t.Fatalf("the control found %d refusals (%v), want 1", len(real), err)
 	}
 
 	// The control first: the line that IS there is kept, so what follows is
 	// about the missing line and not about -only refusing everything.
-	if got, err := collect(config{dir: dir, only: []target{{file: "a.go", line: real[0].line}}}); err != nil || len(got) != 1 {
+	if got, _, err := collect(config{dir: dir, only: []target{{file: "a.go", line: real[0].line}}}); err != nil || len(got) != 1 {
 		t.Fatalf("the line that is there gave %d refusals (%v), want 1", len(got), err)
 	}
 
-	_, err = collect(config{dir: dir, only: []target{{file: "a.go", line: real[0].line + 100}}})
+	_, _, err = collect(config{dir: dir, only: []target{{file: "a.go", line: real[0].line + 100}}})
 	if err == nil {
 		t.Fatal("a line that holds no refusal was accepted, so a stale -only list would sweep nothing and look clean")
 	}
@@ -332,7 +332,7 @@ func One(n int) error {
 	// Unparseable, so reading it at all is a failure this test can see.
 	write(t, dir, "b.go", "package x\n\nthis is not Go\n")
 
-	got, err := collect(config{dir: dir, only: []target{{file: "a.go", line: 6}}})
+	got, _, err := collect(config{dir: dir, only: []target{{file: "a.go", line: 6}}})
 	if err != nil {
 		t.Fatalf("-only read a file it was not asked about: %v", err)
 	}
@@ -371,5 +371,115 @@ func TestOnlyReadsItsTargets(t *testing.T) {
 		if _, err := parseTargets(bad); err == nil {
 			t.Errorf("%q was accepted, and would have matched nothing", bad)
 		}
+	}
+}
+
+// A file the build excludes is refused when it is NAMED.
+//
+// This is the one case where a sweep can report a clean package it never
+// compiled. The command does not build the file, so deleting a refusal in it
+// changes nothing the command can see, the suite passes, and the verdict is
+// SURVIVED -- "nothing covers this" -- when the truth is that nothing LOOKED.
+//
+// Measured on go-crdt/collab before this check existed: its root holds 286
+// refusals of which 41 are under `js && wasm`, and one of those deleted gave
+// "THE SUITE SURVIVED IT" after ninety-three seconds of running a suite that
+// never compiled the file.
+func TestANamedFileTheBuildExcludesIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "native.go", `package x
+
+import "errors"
+
+func One(n int) error {
+	if n < 0 {
+		return errors.New("one")
+	}
+	return nil
+}
+`)
+	// A constraint no host this runs on satisfies, and not a GOOS name, so the
+	// fixture does not depend on which platform the test runs on.
+	write(t, dir, "nowhere.go", `//go:build mutsweep_never
+
+package x
+
+import "errors"
+
+func Two(n int) error {
+	if n == 7 {
+		return errors.New("two")
+	}
+	return nil
+}
+`)
+
+	// The control, and it comes first: the file that IS in the build is found,
+	// so what follows is about the exclusion and not about collect refusing
+	// every named file.
+	got, _, err := collect(config{dir: dir, files: []string{"native.go"}})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("the file in the build gave %d refusals (%v), want 1", len(got), err)
+	}
+
+	_, _, err = collect(config{dir: dir, files: []string{"nowhere.go"}})
+	if err == nil {
+		t.Fatal("a file the build excludes was accepted, and every refusal in it would be reported as SURVIVED")
+	}
+	for _, want := range []string{"nowhere.go", "SURVIVED", "GOOS"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal says %q, which does not mention %q", err, want)
+		}
+	}
+
+	// Naming it through -only is the same claim, and gets the same answer.
+	if _, _, err := collect(config{dir: dir, only: []target{{file: "nowhere.go", line: 8}}}); err == nil {
+		t.Error("-only accepted a file the build excludes")
+	}
+}
+
+// A directory sweep is not a claim about every file in it, so an excluded file
+// is skipped -- and RETURNED, because skipping it quietly is how a campaign
+// comes to believe it covered a package it never compiled.
+func TestADirectorySweepSkipsAndReportsWhatTheBuildExcludes(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "native.go", `package x
+
+import "errors"
+
+func One(n int) error {
+	if n < 0 {
+		return errors.New("one")
+	}
+	return nil
+}
+`)
+	write(t, dir, "nowhere.go", `//go:build mutsweep_never
+
+package x
+
+import "errors"
+
+func Two(n int) error {
+	if n == 7 {
+		return errors.New("two")
+	}
+	return nil
+}
+`)
+
+	got, excluded, err := collect(config{dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("swept %d refusals, want 1 -- the excluded file's refusal must not be in the list", len(got))
+	}
+	if len(excluded) != 1 || excluded[0] != "nowhere.go" {
+		t.Fatalf("reported %v as excluded, want [nowhere.go]", excluded)
+	}
+	// And it is the right one that survived the filter.
+	if !strings.Contains(got[0].cond, "n < 0") {
+		t.Errorf("the refusal kept is %q, which is not the one in the file the build includes", got[0].cond)
 	}
 }

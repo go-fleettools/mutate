@@ -85,6 +85,52 @@ list is written from a report and goes stale two ways — the file is edited aft
 the report, or the line is mistyped — and both otherwise end as a sweep of
 nothing, which is the one result that reads like a clean one.
 
+### A file the build excludes is not a file nothing covers
+
+This is the one way a sweep can report a clean package it never compiled, and it
+is silent.
+
+A `//go:build js && wasm` file is not in a native build. The command does not
+compile it, so deleting a refusal in it changes nothing the command can see, the
+suite passes, and the verdict is **SURVIVED — nothing covers this**, when the
+truth is that nothing *looked*. Measured on `go-crdt/collab`, whose root holds
+286 refusals of which **41** are under that constraint: one of them deleted gave
+`THE SUITE SURVIVED IT` after ninety-three seconds of running a suite that never
+compiled the file.
+
+So `mutsweep` reads `GOOS` and `GOARCH` the way the go tool does and asks the
+same question about each file. **Naming a file is a claim about it**, so an
+excluded one named in `-files` or `-only` is an error, with exit status 2:
+
+```console
+$ mutsweep -files peer_js.go -- go test ./...
+mutsweep: the darwin/arm64 build excludes peer_js.go — a refusal there is not
+compiled by the command, so deleting it changes nothing and every one would be
+reported as SURVIVED when nothing looked. Sweep them with the platform set on BOTH
+this command and the one it runs, and with a command that RUNS the tests rather
+than one that only builds them ...
+```
+
+A directory sweep is not a claim about every file in it, so those are skipped —
+and **named**, because skipping them quietly is how a campaign comes to believe it
+covered a package it never compiled:
+
+```console
+$ mutsweep -dir . -- go test ./...
+mutsweep: not swept, the darwin/arm64 build excludes them: bcast_js.go,
+bcast_lock_js.go, peer_js.go, webrtc_js.go, websocket_js.go
+mutsweep: 245 refusals, 5m0s each at most, through "go test ./..."
+```
+
+286 before, 245 after, and the 41 accounted for by name rather than by a number
+nobody can check.
+
+The advice in that message names a command that **runs** the tests, and the reason
+is worth repeating: its first draft suggested `GOOS=js GOARCH=wasm go vet`, which
+compiles the file — so the mutant is a real mutant — but cannot go red for any
+mutation that still compiles. Every refusal came back `SURVIVED` in one second. A
+sweep needs a command that *can* fail.
+
 ### Four verdicts, because two is not enough
 
 | verdict | meaning |
