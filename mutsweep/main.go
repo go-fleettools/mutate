@@ -36,6 +36,21 @@
 // It exits non-zero when anything survived or hung, because those are the two
 // answers that need somebody to read them.
 //
+// # THE FILE THE BUILD LEAVES OUT
+//
+// There is one way a sweep can report a clean package it never compiled, and it
+// is silent. A `js && wasm` file is not in a native build: the command does not
+// compile it, so deleting a refusal there changes nothing the command can see,
+// the suite passes, and the verdict is SURVIVED -- "nothing covers this" --
+// when the truth is that nothing LOOKED.
+//
+// So this reads GOOS and GOARCH the way the go tool does and asks the same
+// question of each file. Naming a file is a claim about it, so an excluded one
+// named in -files or -only is an error; a directory sweep is not a claim about
+// every file in it, so those are skipped and NAMED. On go-crdt/collab that is
+// 286 refusals before and 245 after, with the 41 accounted for rather than
+// invented as survivors.
+//
 // # ANSWERING THE REPORT
 //
 // A sweep is the slow half. The fast half is the one that happens over and over:
@@ -55,8 +70,10 @@ package main
 
 import (
 	"fmt"
+	"go/build"
 	"io"
 	"os"
+	"strings"
 )
 
 // active marks a sweep in progress, in the environment the command inherits.
@@ -85,10 +102,17 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
-	guards, err := collect(cfg)
+	guards, excluded, err := collect(cfg)
 	if err != nil {
 		fmt.Fprintln(stderr, "mutsweep:", err)
 		return 2
+	}
+	if len(excluded) > 0 {
+		// Said rather than skipped quietly. A file the build leaves out is the
+		// one case where a sweep can report a clean package it never compiled,
+		// and the only defence is a report that names what it did not read.
+		fmt.Fprintf(stderr, "mutsweep: not swept, the %s/%s build excludes them: %s\n",
+			build.Default.GOOS, build.Default.GOARCH, strings.Join(excluded, ", "))
 	}
 	if len(guards) == 0 {
 		// A sweep that found nothing to do is not a clean sweep. A changed

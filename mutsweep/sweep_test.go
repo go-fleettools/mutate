@@ -143,7 +143,7 @@ func TestReturns(t *testing.T) { Wait(0) }
 			if timeout == 0 {
 				timeout = 2 * time.Minute
 			}
-			guards, err := collect(config{dir: dir})
+			guards, _, err := collect(config{dir: dir})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -210,7 +210,7 @@ func TestAMutateThatCannotRunIsNotAVerdictAboutTheCode(t *testing.T) {
 	write(t, dir, "x.go", "package x\n\nimport \"errors\"\n\nvar e = errors.New(\"no\")\n\nfunc F(n int) error {\n\tif n < 0 {\n\t\treturn e\n\t}\n\treturn nil\n}\n")
 	write(t, dir, "x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestF(t *testing.T) {\n\tif F(1) != nil {\n\t\tt.Fatal(\"refused a positive\")\n\t}\n}\n")
 
-	gs, err := collect(config{dir: dir})
+	gs, _, err := collect(config{dir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func Wait(n int) {
 	write(t, dir, "x.go", src)
 	write(t, dir, "x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestReturns(t *testing.T) { Wait(0) }\n")
 
-	gs, err := collect(config{dir: dir})
+	gs, _, err := collect(config{dir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func Wait(n int) {
 	write(t, dir, "x.go", src)
 	write(t, dir, "x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestReturns(t *testing.T) { Wait(0) }\n")
 
-	gs, err := collect(config{dir: dir})
+	gs, _, err := collect(config{dir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}

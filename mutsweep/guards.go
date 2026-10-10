@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/printer"
 	"go/token"
@@ -120,7 +121,57 @@ func parseTargets(s string) ([]target, error) {
 // return. The initialiser matters: deleting `if err := f(); err != nil { ... }`
 // deletes the CALL too, which is a different and larger change than the one
 // being reported.
-func collect(cfg config) ([]guard, error) {
+// partitionByBuild splits files into the ones the go tool would compile for the
+// platform this process is pointed at, and the ones it would not.
+//
+// It reads GOOS and GOARCH the way the go tool does, through [build.Default],
+// so `GOOS=js GOARCH=wasm mutsweep` and `GOOS=js GOARCH=wasm go test` agree
+// about which files exist.
+func partitionByBuild(dir string, paths []string) (in, excluded []string, err error) {
+	ctx := build.Default
+	for _, p := range paths {
+		full := filepath.Join(dir, p)
+		ok, mErr := ctx.MatchFile(filepath.Dir(full), filepath.Base(full))
+		if mErr != nil {
+			return nil, nil, fmt.Errorf("%s: %w", full, mErr)
+		}
+		if ok {
+			in = append(in, p)
+		} else {
+			excluded = append(excluded, p)
+		}
+	}
+	return in, excluded, nil
+}
+
+// excludedError says what an excluded file means, because the number it would
+// otherwise produce is worse than no number.
+//
+// A file the build leaves out is not compiled by the command, so deleting a
+// refusal in it changes nothing the command can see and the suite passes. That
+// is reported as SURVIVED -- "nothing covers this" -- when the truth is that
+// nothing LOOKED. Measured on go-crdt/collab, whose root holds 286 refusals of
+// which 41 are under `js && wasm`: a native sweep of those files invents 41
+// survivors, each after a full minute of running a suite that never compiled
+// them.
+//
+// The message names a command that RUNS the tests rather than one that only
+// builds them, because the first draft of it suggested `go vet` and that was
+// advice leading to a verdict worth nothing: vet compiles the file, so the
+// mutant is a mutant, but vet cannot fail for any mutation that still compiles
+// -- every refusal comes back SURVIVED in a second. A sweep needs a command
+// that can go red.
+func excludedError(dir string, excluded []string) error {
+	return fmt.Errorf("the %s/%s build excludes %s — a refusal there is not compiled by the command, "+
+		"so deleting it changes nothing and every one would be reported as SURVIVED when nothing looked. "+
+		"Sweep them with the platform set on BOTH this command and the one it runs, and with a command that "+
+		"RUNS the tests rather than one that only builds them (a build-only command cannot go red for a "+
+		"mutation that still compiles, so every refusal would survive it), e.g. "+
+		"`GOOS=js GOARCH=wasm mutsweep -dir %s -files %s -- go test -exec \"$(go env GOROOT)/lib/wasm/go_js_wasm_exec\" .`",
+		build.Default.GOOS, build.Default.GOARCH, strings.Join(excluded, ", "), dir, strings.Join(excluded, ","))
+}
+
+func collect(cfg config) ([]guard, []string, error) {
 	paths := cfg.files
 	if len(paths) == 0 && len(cfg.only) > 0 {
 		// The targets name their files, so there is no reason to parse the rest
@@ -134,10 +185,11 @@ func collect(cfg config) ([]guard, error) {
 		}
 		sort.Strings(paths)
 	}
+	named := len(paths) > 0
 	if len(paths) == 0 {
 		entries, err := os.ReadDir(cfg.dir)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, e := range entries {
 			n := e.Name()
@@ -148,6 +200,18 @@ func collect(cfg config) ([]guard, error) {
 		sort.Strings(paths)
 	}
 
+	// Naming a file is a claim about it, so an excluded one named explicitly is
+	// an error. A directory sweep is not a claim about every file in it, so
+	// those are skipped -- and returned, because skipping them silently is how
+	// a campaign comes to believe it covered a package it never compiled.
+	paths, excluded, err := partitionByBuild(cfg.dir, paths)
+	if err != nil {
+		return nil, nil, err
+	}
+	if named && len(excluded) > 0 {
+		return nil, nil, excludedError(cfg.dir, excluded)
+	}
+
 	var out []guard
 	for _, p := range paths {
 		// Relative to -dir, because the command and mutate both run THERE:
@@ -155,12 +219,12 @@ func collect(cfg config) ([]guard, error) {
 		full := filepath.Join(cfg.dir, p)
 		src, err := os.ReadFile(full)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, full, src, parser.ParseComments)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			// A statement list is not always a BlockStmt: a case in a switch
@@ -210,9 +274,10 @@ func collect(cfg config) ([]guard, error) {
 		})
 	}
 	if len(cfg.only) > 0 {
-		return keepOnly(out, cfg.only)
+		g, kErr := keepOnly(out, cfg.only)
+		return g, excluded, kErr
 	}
-	return out, nil
+	return out, excluded, nil
 }
 
 // keepOnly narrows a collection to the named refusals, and refuses a name that
