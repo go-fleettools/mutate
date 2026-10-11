@@ -32,10 +32,27 @@ type result struct {
 	note    string
 }
 
+// marginOverBaseline is how much longer than the unmutated suite the timeout has
+// to be before a HUNG verdict means anything.
+//
+// Three, measured against the two campaigns behind the numbers in the README. On
+// go-crdt/crdt the suite took 14s under a 4m timeout -- seventeen times over --
+// and its one HUNG was real: the guard bounded a walk over 2^62. On
+// go-crdt/collab the suite took 60s under a 5m timeout, five times over, and SIX
+// mutants came back HUNG. Two of those were then CAUGHT in seconds by their own
+// targeted test, so nothing was hanging: the suite was finishing late, and a
+// legitimate survivor in the same run took 4m22s of the 5m allowed. Three is
+// what the thin case needed and what the roomy case had many times over.
+const marginOverBaseline = 3
+
 // sweep deletes each guard in turn and reports what the suite did about it.
 func sweep(cfg config, guards []guard, cmd []string, stdout, stderr io.Writer) int {
-	fmt.Fprintf(stdout, "mutsweep: %d refusals, %v each at most, through %q\n",
-		len(guards), cfg.timeout, strings.Join(cmd, " "))
+	base, code := baseline(cfg, cmd, stderr)
+	if code != 0 {
+		return code
+	}
+	fmt.Fprintf(stdout, "mutsweep: %d refusals, %v each at most, through %q (the suite itself takes %v)\n",
+		len(guards), cfg.timeout, strings.Join(cmd, " "), base.Round(time.Millisecond))
 
 	results := make([]result, 0, len(guards))
 	for i, g := range guards {
@@ -44,7 +61,79 @@ func sweep(cfg config, guards []guard, cmd []string, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "[%d/%d] %-12s %s:%d  %s  %s\n",
 			i+1, len(guards), r.verdict, g.file, g.line, trim(g.cond, 60), r.note)
 	}
-	return report(results, stdout, stderr)
+	return report(results, cfg.timeout, stdout, stderr)
+}
+
+// baseline runs the command once with nothing mutated, which is the measurement
+// every verdict is relative to and which this tool did without until
+// 2026-10-11.
+//
+// Two wrong answers come from not having it, and the first is the worse:
+//
+//   - ⛔ A SWEEP OVER AN ALREADY-RED SUITE REPORTS EVERY GUARD AS CAUGHT. The
+//     command fails whatever is deleted, so every mutant looks held and the
+//     summary is the strongest false reassurance there is: "0 survived".
+//
+//   - ⛔ A HUNG VERDICT IS A STATEMENT ABOUT THE TIME ALLOWED. On go-crdt/collab
+//     a 60-second suite under a 5-minute timeout produced six HUNG, of which at
+//     least two were simply slower -- caught in seconds by their own targeted
+//     test. A legitimate survivor in the same run took 4m22s.
+//
+// It costs one run of the command, against one per guard.
+func baseline(cfg config, cmd []string, stderr io.Writer) (time.Duration, int) {
+	runIn := cfg.runIn
+	if runIn == "" {
+		runIn = cfg.dir
+	}
+	if runIn == "" {
+		fmt.Fprintln(stderr, "mutsweep: no directory to run the command in")
+		return 0, 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.timeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
+	c.Dir = runIn
+	// The same marker every mutant's command carries: a baseline that reached
+	// this tool again would start a sweep of its own.
+	c.Env = append(os.Environ(), active+"=1")
+	ownGroup(c)
+
+	start := time.Now()
+	out, err := runBounded(ctx, c)
+	took := time.Since(start)
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		fmt.Fprintf(stderr, "mutsweep: the command did not finish in %v with NOTHING mutated, so no verdict "+
+			"below it could mean anything — raise -timeout past what the suite itself takes\n%s\n",
+			cfg.timeout, lastOf(out))
+		return 0, 2
+	case err != nil:
+		fmt.Fprintf(stderr, "mutsweep: the command FAILS with nothing mutated, so every guard would be reported "+
+			"as caught and the sweep would read as a clean one — fix the suite first\n%v\n%s\n",
+			err, lastOf(out))
+		return 0, 2
+	}
+
+	if least := marginOverBaseline * took; cfg.timeout < least {
+		fmt.Fprintf(stderr, "mutsweep: the suite takes %v and -timeout is %v, under %d times it: a mutant that "+
+			"merely makes the suite SLOWER would be reported HUNG, as six were on go-crdt/collab. "+
+			"Use -timeout %v or more\n",
+			took.Round(time.Millisecond), cfg.timeout, marginOverBaseline, least.Round(time.Second))
+		return 0, 2
+	}
+	return took, 0
+}
+
+// lastOf is the end of a command's output, which is where a Go test suite says
+// what failed.
+func lastOf(b []byte) string {
+	const keep = 600
+	if len(b) <= keep {
+		return strings.TrimSpace(string(b))
+	}
+	return "…" + strings.TrimSpace(string(b[len(b)-keep:]))
 }
 
 // one runs a single deletion through mutate, which owns applying it and putting
@@ -127,7 +216,7 @@ func one(cfg config, g guard, cmd []string) result {
 	return r
 }
 
-func report(rs []result, stdout, stderr io.Writer) int {
+func report(rs []result, timeout time.Duration, stdout, stderr io.Writer) int {
 	counts := map[verdict]int{}
 	for _, r := range rs {
 		counts[r.verdict]++
@@ -156,6 +245,14 @@ func report(rs []result, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stderr, "\nwhat nothing holds:")
 	for _, r := range needed {
 		fmt.Fprintf(stderr, "  %-10s %s:%d  %s\n", r.verdict, r.file, r.line, trim(r.cond, 70))
+	}
+	if counts[hung] > 0 {
+		if slowest, close := nearTheLimit(rs, timeout); close {
+			fmt.Fprintf(stderr, "\n⚠ A mutant that ANSWERED took %v of the %v allowed, so the %d HUNG above may be\n"+
+				"slower rather than stuck. Re-run them alone against a test that names the guard:\n"+
+				"  mutsweep -only %s -timeout %v -- <a command that exercises it>\n",
+				slowest.Round(time.Second), timeout, counts[hung], onlyList(needed), 4*timeout)
+		}
 	}
 	fmt.Fprintln(stderr, "\nA survivor is not yet a defect: it may be a bound doubled one layer down,")
 	fmt.Fprintln(stderr, "a fast path, or the same value by another line. Read each one before")
@@ -241,4 +338,36 @@ func ensureRestored(path string, before []byte, readErr error) error {
 		return fmt.Errorf("RESTORE FAILED for %s: %w", path, err)
 	}
 	return fmt.Errorf("the mutation outlived mutate and was put back here")
+}
+
+// nearTheLimit reports the longest run that actually ANSWERED, and whether it
+// came close enough to the timeout to make a HUNG verdict in the same sweep
+// untrustworthy.
+//
+// This is the signal the margin check cannot give. On go-crdt/collab the suite
+// took 60s under a 5m timeout -- five times over, which marginOverBaseline
+// allows -- and six mutants still came back HUNG, while a legitimate SURVIVOR
+// in the same run took 4m22s. The ratio that mattered was not timeout over
+// baseline but timeout over the slowest mutant that finished.
+func nearTheLimit(rs []result, timeout time.Duration) (time.Duration, bool) {
+	var slowest time.Duration
+	for _, r := range rs {
+		if r.verdict != hung && r.took > slowest {
+			slowest = r.took
+		}
+	}
+	// Two thirds: at that point a mutant only half again slower than the
+	// slowest one that answered would be called HUNG.
+	return slowest, slowest*3 > timeout*2
+}
+
+// onlyList renders the -only argument that re-asks about the hung ones.
+func onlyList(rs []result) string {
+	var at []string
+	for _, r := range rs {
+		if r.verdict == hung {
+			at = append(at, fmt.Sprintf("%s:%d", r.file, r.line))
+		}
+	}
+	return strings.Join(at, ",")
 }

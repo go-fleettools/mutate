@@ -36,6 +36,25 @@
 // It exits non-zero when anything survived or hung, because those are the two
 // answers that need somebody to read them.
 //
+// # THE SUITE IS MEASURED ONCE FIRST
+//
+// Before anything is deleted, the command runs unmutated. Two wrong answers
+// come from not doing that, and the first is the worse:
+//
+//	a sweep over an ALREADY-RED suite reports every guard as caught. The
+//	command fails whatever is deleted, so every mutant looks held and the
+//	summary is the strongest false reassurance there is -- "0 survived".
+//
+//	a HUNG verdict is a statement about the time ALLOWED. The baseline is
+//	printed, and a timeout under three times it is refused, because a mutant
+//	that merely makes the suite slower would be called HUNG. That floor is not
+//	sufficient and the report says so: on go-crdt/collab a 60s suite under a
+//	5m timeout -- five times over -- still produced six HUNG, two of which
+//	were caught in seconds by their own targeted test, while a legitimate
+//	survivor in the same run took 4m22s. So the report also watches the
+//	timeout against the slowest mutant that FINISHED, and names the -only
+//	command to re-ask about the hung ones.
+//
 // # THE FILE THE BUILD LEAVES OUT
 //
 // There is one way a sweep can report a clean package it never compiled, and it

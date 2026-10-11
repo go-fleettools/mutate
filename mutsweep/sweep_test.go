@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -173,7 +174,7 @@ func TestReportExitsOnWhatNeedsReading(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var out, errOut strings.Builder
-			if got := report(tt.in, &out, &errOut); got != tt.want {
+			if got := report(tt.in, time.Minute, &out, &errOut); got != tt.want {
 				t.Fatalf("exit %d, want %d", got, tt.want)
 			}
 		})
@@ -226,7 +227,7 @@ func TestAMutateThatCannotRunIsNotAVerdictAboutTheCode(t *testing.T) {
 	// And a run that could not run fails the summary, rather than passing as a
 	// sweep in which nothing survived.
 	var out, errOut strings.Builder
-	if code := report([]result{{verdict: caught}, got}, &out, &errOut); code != 1 {
+	if code := report([]result{{verdict: caught}, got}, time.Minute, &out, &errOut); code != 1 {
 		t.Fatalf("exit %d, want 1", code)
 	}
 	if !strings.Contains(errOut.String(), "never ran") {
@@ -367,4 +368,173 @@ func main() {
 		t.Fatalf("building the stand-in: %v\n%s", err, out)
 	}
 	return bin
+}
+
+// A sweep over an already-red suite would report every guard as caught.
+//
+// This is the worst answer this tool can give, because it is the most
+// reassuring: the command fails whatever is deleted, so every mutant looks
+// held and the summary reads "0 survived". It ran without this check until
+// 2026-10-11.
+//
+// The control comes first and it is the same fixture with a passing command, so
+// what follows is about the suite being red and not about the fixture.
+func TestASweepRefusesASuiteThatIsAlreadyRed(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "x.go", oneGuard)
+	cfg := config{dir: dir, timeout: 30 * time.Second, mutate: buildMutate(t)}
+
+	var out, errOut bytes.Buffer
+	if code := sweep(cfg, oneGuardOf(t, dir), []string{"true"}, &out, &errOut); code == 2 {
+		t.Fatalf("the control was refused: %s", errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code := sweep(cfg, oneGuardOf(t, dir), []string{"false"}, &out, &errOut)
+	if code != 2 {
+		t.Errorf("exit %d, want 2 — a red suite reports every guard as caught", code)
+	}
+	if !strings.Contains(errOut.String(), "FAILS with nothing mutated") {
+		t.Errorf("the refusal does not say why: %s", errOut.String())
+	}
+	if strings.Contains(out.String(), "caught") {
+		t.Errorf("it swept anyway and reported a verdict: %s", out.String())
+	}
+}
+
+// A timeout that is not comfortably above the suite's own duration makes HUNG
+// meaningless, so it is refused with both numbers.
+//
+// Measured on go-crdt/collab: a 60-second suite under a 5-minute timeout
+// produced six HUNG, at least two of which were caught in seconds by their own
+// targeted test. A legitimate survivor in the same run took 4m22s.
+func TestASweepRefusesATimeoutTooCloseToTheSuitesOwnDuration(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "x.go", oneGuard)
+	mutateBin := buildMutate(t)
+
+	// A command that takes a measurable moment, so the margin is a real ratio
+	// rather than a comparison against zero.
+	slow := []string{"sleep", "1"}
+
+	var out, errOut bytes.Buffer
+	roomy := config{dir: dir, timeout: 20 * time.Second, mutate: mutateBin}
+	if code := sweep(roomy, oneGuardOf(t, dir), slow, &out, &errOut); code == 2 {
+		t.Fatalf("the control was refused with twenty times the margin: %s", errOut.String())
+	}
+	if !strings.Contains(out.String(), "the suite itself takes") {
+		t.Errorf("the baseline is not reported: %s", out.String())
+	}
+
+	errOut.Reset()
+	thin := config{dir: dir, timeout: 2 * time.Second, mutate: mutateBin}
+	if code := sweep(thin, oneGuardOf(t, dir), slow, &bytes.Buffer{}, &errOut); code != 2 {
+		t.Errorf("exit %d, want 2 — two seconds for a one-second suite cannot tell slow from hung", code)
+	}
+	for _, want := range []string{"the suite takes", "-timeout"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("the refusal does not mention %q: %s", want, errOut.String())
+		}
+	}
+}
+
+// And a command that does not finish at all with nothing mutated is refused
+// before any guard is touched.
+func TestASweepRefusesACommandThatCannotEvenFinishUnmutated(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "x.go", oneGuard)
+	cfg := config{dir: dir, timeout: time.Second, mutate: buildMutate(t)}
+
+	var errOut bytes.Buffer
+	code := sweep(cfg, oneGuardOf(t, dir), []string{"sleep", "30"}, &bytes.Buffer{}, &errOut)
+	if code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	if !strings.Contains(errOut.String(), "NOTHING mutated") {
+		t.Errorf("the refusal does not say so: %s", errOut.String())
+	}
+}
+
+const oneGuard = `package x
+
+import "errors"
+
+func One(n int) error {
+	if n < 0 {
+		return errors.New("negative")
+	}
+	return nil
+}
+`
+
+func oneGuardOf(t *testing.T, dir string) []guard {
+	t.Helper()
+	gs, _, err := collect(config{dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gs) != 1 {
+		t.Fatalf("the fixture holds %d guards, want 1", len(gs))
+	}
+	return gs
+}
+
+// A HUNG verdict sitting beside a mutant that ANSWERED slowly is suspect, and
+// the report says so.
+//
+// This is the signal the baseline margin cannot give. On go-crdt/collab the
+// suite took 60s under a 5m timeout -- five times over, which
+// marginOverBaseline allows -- and six mutants came back HUNG while a
+// legitimate SURVIVOR in the same run took 4m22s. Two of the six were then
+// caught in seconds by their own targeted test. The ratio that mattered was
+// timeout over the slowest mutant that FINISHED, not over the baseline.
+func TestAHungVerdictBesideASlowAnswerIsFlagged(t *testing.T) {
+	timeout := time.Minute
+
+	// The control: a hang beside answers that finished quickly says nothing
+	// about the timeout, so there must be no caution.
+	var out, errOut strings.Builder
+	report([]result{
+		{verdict: caught, took: time.Second},
+		{verdict: hung},
+	}, timeout, &out, &errOut)
+	// "slower rather than stuck", not "may be": the closing paragraph below
+	// already says "it may be a bound doubled one layer down", so a witness
+	// matching that would fire on the help text instead of on the caution.
+	if strings.Contains(errOut.String(), "slower rather than stuck") {
+		t.Errorf("a quick run was flagged: %s", errOut.String())
+	}
+
+	// And the collab shape: an answer at 44s of 60s allowed.
+	out.Reset()
+	errOut.Reset()
+	report([]result{
+		{verdict: survived, took: 44 * time.Second, guard: guard{file: "a.go", line: 1}},
+		{verdict: hung, guard: guard{file: "b.go", line: 2}},
+		{verdict: hung, guard: guard{file: "c.go", line: 3}},
+	}, timeout, &out, &errOut)
+	got := errOut.String()
+	for _, want := range []string{"slower rather than stuck", "44s of the 1m0s allowed", "2 HUNG", "-only b.go:2,c.go:3"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the caution does not contain %q:\n%s", want, got)
+		}
+	}
+}
+
+// nearTheLimit ignores the hung ones when looking for the slowest answer: a
+// hang's elapsed time IS the timeout, so counting it would flag every sweep
+// that had one.
+func TestTheSlowestAnswerIgnoresTheHangs(t *testing.T) {
+	rs := []result{
+		{verdict: hung, took: time.Minute},
+		{verdict: caught, took: 2 * time.Second},
+	}
+	slowest, close := nearTheLimit(rs, time.Minute)
+	if slowest != 2*time.Second {
+		t.Errorf("slowest answer %v, want 2s — a hang's own duration is the timeout", slowest)
+	}
+	if close {
+		t.Error("two seconds of a minute was called close")
+	}
 }

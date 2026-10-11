@@ -131,6 +131,48 @@ compiles the file — so the mutant is a real mutant — but cannot go red for a
 mutation that still compiles. Every refusal came back `SURVIVED` in one second. A
 sweep needs a command that *can* fail.
 
+### The suite is measured once, before anything is deleted
+
+Two wrong answers come from not doing this, and the first is the worse.
+
+**A sweep over an already-red suite reports every guard as caught.** The command
+fails whatever is deleted, so every mutant looks held and the summary is the
+strongest false reassurance there is: `0 survived`. This tool ran without that
+check until 2026-10-11.
+
+```console
+$ mutsweep -dir . -- go test ./...
+mutsweep: the command FAILS with nothing mutated, so every guard would be reported
+as caught and the sweep would read as a clean one — fix the suite first
+```
+
+**A `HUNG` verdict is a statement about the time allowed.** The baseline is printed
+on every run, and a timeout under three times it is refused, because a mutant that
+merely makes the suite *slower* would be called `HUNG`:
+
+```console
+$ mutsweep -dir . -timeout 30s -- go test ./...
+mutsweep: the suite takes 21.3s and -timeout is 30s, under 3 times it: a mutant that
+merely makes the suite SLOWER would be reported HUNG, as six were on go-crdt/collab.
+Use -timeout 1m4s or more
+```
+
+That floor is **not sufficient**, and the report says so rather than implying
+otherwise. On `go-crdt/collab` the suite took 60s under a 5m timeout — five times
+over, which the floor allows — and six mutants still came back `HUNG`, while a
+legitimate **survivor in the same run took 4m22s**. Two of the six were then
+`caught` in seconds by their own targeted test, so nothing was hanging; the suite
+was finishing late. The ratio that mattered was the timeout over the slowest mutant
+that *finished*, so that is what the report watches:
+
+```
+⚠ A mutant that ANSWERED took 4m22s of the 5m0s allowed, so the 6 HUNG above may be
+slower rather than stuck. Re-run them alone against a test that names the guard:
+  mutsweep -only backoff.go:14,backoff.go:26,… -timeout 20m -- <a command that exercises it>
+```
+
+The baseline costs one run of the command, against one per guard.
+
 ### Four verdicts, because two is not enough
 
 | verdict | meaning |
