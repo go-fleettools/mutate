@@ -192,7 +192,35 @@ func TestANestedSweepRefusesToStart(t *testing.T) {
 		t.Fatalf("building the tool: %v\n%s", err, out)
 	}
 
-	c := exec.Command(bin, "-dir", ".", "--", "true")
+	// A fixture directory, and not `.`, for two reasons that both bit.
+	//
+	// The control below runs a real sweep. Pointed at `.` it swept THIS
+	// package's own source in the working tree, mutating and restoring the
+	// checked-out files of the repository the test runs in -- which is the
+	// neighbourhood of the 10,837 processes above, and no place for a control.
+	//
+	// And it drove `mutate` from PATH, since that is the default. The tool says
+	// so loudly when that fails -- "NOT RUN ... the mutate command could not be
+	// started" -- but this control asserted only that the output does NOT
+	// contain the nested-sweep refusal, which is true of that output too. So on
+	// a machine with no `mutate` installed it passed with nothing having run.
+	// It gets the one built from this repository, and an assertion that reads
+	// the summary.
+	dir := t.TempDir()
+	write(t, dir, "x.go", `package x
+
+import "errors"
+
+func One(n int) error {
+	if n < 0 {
+		return errors.New("negative")
+	}
+	return nil
+}
+`)
+	mutateBin := buildMutate(t)
+
+	c := exec.Command(bin, "-dir", dir, "-mutate", mutateBin, "--", "true")
 	c.Env = append(os.Environ(), "MUTSWEEP_ACTIVE=1")
 	out, err := c.CombinedOutput()
 	if err == nil {
@@ -202,14 +230,20 @@ func TestANestedSweepRefusesToStart(t *testing.T) {
 		t.Errorf("it refused for some other reason: %s", out)
 	}
 
-	// The control: without the marker, the same invocation gets as far as
-	// looking for guards, so the refusal above is about the marker and not
-	// about the arguments.
-	c2 := exec.Command(bin, "-dir", ".", "--", "true")
+	// The control: without the marker, the same invocation sweeps, so the
+	// refusal above is about the marker and not about the arguments.
+	c2 := exec.Command(bin, "-dir", dir, "-mutate", mutateBin, "--", "true")
 	c2.Env = append(os.Environ(), "MUTSWEEP_ACTIVE=")
 	out2, _ := c2.CombinedOutput()
 	if strings.Contains(string(out2), "refusing to run inside another sweep") {
 		t.Errorf("it refuses even outside a sweep: %s", out2)
+	}
+	// "1 survived" and not "1 refusals": the count is printed before anything
+	// runs, and the summary only after. Measured both ways -- with a working
+	// mutate the summary says "1 survived", and with a missing one it says
+	// "0 survived" under a NOT RUN line.
+	if !strings.Contains(string(out2), "1 survived") {
+		t.Errorf("the control reached no verdict, so it proves nothing: %s", out2)
 	}
 }
 
