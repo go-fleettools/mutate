@@ -125,6 +125,38 @@ mutsweep: 245 refusals, 5m0s each at most, through "go test ./..."
 286 before, 245 after, and the 41 accounted for by name rather than by a number
 nobody can check.
 
+### Planning a campaign, and auditing it: `-tally`
+
+A package too big for one run is swept in chunks, and then the chunks have to be
+checked against the package. **Adding them up does not do that.** `collab`'s root
+was swept in three runs of 55, 61 and 32 refusals, and *"148 refusals, that closes
+the root package"* was published — while the package holds **245**. Ninety-seven
+refusals in eight files had been in no chunk at all, and the arithmetic could not
+say so, because it never asked the package.
+
+The total above is what caught it, afterwards. It says how many and never *which*,
+so until now a chunk list could only be checked against a grep of the sweep's own
+output — which is why the gap survived a check already written down as the remedy
+for exactly this:
+
+```console
+$ mutsweep -dir . -tally
+mutsweep: not swept, the darwin/arm64 build excludes them: bcast_js.go, ...
+245 refusals in 22 file(s) of .
+     31  wire.go
+     25  dirstore.go
+     24  server.go
+     21  client.go
+     17  follow.go
+     ...
+      2  backoff.go
+```
+
+It **runs nothing** — the first thing its test asserts, since a tally that swept
+would cost what it exists to plan — and it needs no command. With `-files` it
+counts what a chunk *will* sweep, so the comparison can be made before the hour is
+spent rather than after the claim is published.
+
 The advice in that message names a command that **runs** the tests, and the reason
 is worth repeating: its first draft suggested `GOOS=js GOARCH=wasm go vet`, which
 compiles the file — so the mutant is a real mutant — but cannot go red for any

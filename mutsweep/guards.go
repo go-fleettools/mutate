@@ -24,6 +24,7 @@ type config struct {
 	only    []target
 	timeout time.Duration
 	mutate  string
+	tally   bool // count per file and stop, running nothing
 }
 
 // target names one refusal the way a report prints it: the file as -files
@@ -71,6 +72,9 @@ func parse(argv []string, stderr io.Writer) (config, []string, int) {
 		"sweep that quietly swept nothing reads as a clean one")
 	fs.DurationVar(&cfg.timeout, "timeout", 5*time.Minute, "how long one mutant may run before it is called HUNG")
 	fs.StringVar(&cfg.mutate, "mutate", "mutate", "the mutate command to drive")
+	fs.BoolVar(&cfg.tally, "tally", false, "count the refusals per FILE and stop, running nothing.\n"+
+		"For planning a campaign in chunks, and for checking afterwards that the chunks\n"+
+		"covered the package: no command is needed with it")
 	if err := fs.Parse(argv); err != nil {
 		return cfg, nil, 2
 	}
@@ -88,8 +92,12 @@ func parse(argv []string, stderr io.Writer) (config, []string, int) {
 		cfg.runIn = cfg.dir
 	}
 	cmd := fs.Args()
-	if len(cmd) == 0 {
+	if len(cmd) == 0 && !cfg.tally {
+		// -tally runs nothing, so it needs nothing to run. Every other mode
+		// does, and a sweep with no command would report every guard as
+		// surviving a suite that was never there.
 		fmt.Fprintln(stderr, "usage: mutsweep [-dir D] [-files a.go,b.go] [-only a.go:12,...] [-timeout 5m] -- command...")
+		fmt.Fprintln(stderr, "       mutsweep [-dir D] [-files a.go,b.go] -tally")
 		return cfg, nil, 2
 	}
 	return cfg, cmd, 0

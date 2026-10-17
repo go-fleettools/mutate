@@ -517,3 +517,176 @@ func Two(n int) error {
 		t.Errorf("the refusal kept is %q, which is not the one in the file the build includes", got[0].cond)
 	}
 }
+
+// ⛔ -tally answers WHICH file, because the total cannot be planned with.
+//
+// go-crdt/collab's root package was swept in three chunks of 55, 61 and 32
+// refusals, and "148 refusals, that closes the root package" was published --
+// while the package holds 245. Ninety-seven refusals in eight files had been
+// in no chunk at all. `mutsweep -dir . -- true` prints the total before
+// running anything, and that total is what caught it afterwards; it says how
+// many and never which, so the chunk list could only be checked against a grep
+// of the sweep's own output. That is why the gap survived a check already
+// written down as the remedy.
+//
+// The first property asserted here is that it runs NOTHING: a tally that swept
+// would cost what it exists to plan.
+func TestTallyCountsPerFileAndRunsNothing(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "many.go", `package x
+
+import "errors"
+
+func A(n int) error {
+	if n < 0 {
+		return errors.New("one")
+	}
+	if n > 9 {
+		return errors.New("two")
+	}
+	if n == 5 {
+		return errors.New("three")
+	}
+	return nil
+}
+`)
+	write(t, dir, "one.go", `package x
+
+import "errors"
+
+func B(s string) error {
+	if s == "" {
+		return errors.New("empty")
+	}
+	return nil
+}
+`)
+	// A third file with the same count as one.go, to pin the tie-break.
+	write(t, dir, "also_one.go", `package x
+
+import "errors"
+
+func C(s string) error {
+	if s == "?" {
+		return errors.New("huh")
+	}
+	return nil
+}
+`)
+
+	marker := filepath.Join(dir, "it-ran")
+	var out, errOut strings.Builder
+	code := run([]string{"-dir", dir, "-tally", "--", "touch", marker}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the command ran: a tally must cost nothing, which is the whole of why it exists")
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "5 refusals in 3 file(s)") {
+		t.Errorf("the header does not count them: %q", got)
+	}
+	for _, want := range []string{"3  many.go", "1  also_one.go", "1  one.go"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q is not in the tally:\n%s", want, got)
+		}
+	}
+	// Most first, and the name as the tie-break so two runs agree.
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("want a header and three files:\n%s", got)
+	}
+	if !strings.Contains(lines[1], "many.go") {
+		t.Errorf("the file with the most refusals is not first: %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "also_one.go") || !strings.Contains(lines[3], "one.go") {
+		t.Errorf("the tie was not broken by name: %q then %q", lines[2], lines[3])
+	}
+}
+
+// It needs no command, since it runs none -- and WITHOUT it a missing command
+// is still a usage error, because a sweep with nothing to run would report
+// every guard as surviving a suite that was never there.
+func TestTallyNeedsNoCommandAndASweepStillDoes(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "x.go", `package x
+
+import "errors"
+
+func A(n int) error {
+	if n < 0 {
+		return errors.New("negative")
+	}
+	return nil
+}
+`)
+	var out, errOut strings.Builder
+	if code := run([]string{"-dir", dir, "-tally"}, &out, &errOut); code != 0 {
+		t.Errorf("-tally with no command exited %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "1 refusals in 1 file(s)") {
+		t.Errorf("it counted nothing: %q", out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"-dir", dir}, &out, &errOut); code != 2 {
+		t.Errorf("a sweep with no command exited %d, want 2 (stderr: %q)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "-tally") {
+		t.Errorf("the usage does not mention the mode that needs no command: %q", errOut.String())
+	}
+}
+
+// -files narrows the tally, which is how a chunk is checked BEFORE it is run:
+// the count the chunk will sweep, against the count the package holds.
+func TestTallyRespectsTheFileList(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.go", `package x
+
+import "errors"
+
+func A(n int) error {
+	if n < 0 {
+		return errors.New("one")
+	}
+	if n > 9 {
+		return errors.New("two")
+	}
+	return nil
+}
+`)
+	write(t, dir, "b.go", `package x
+
+import "errors"
+
+func B(s string) error {
+	if s == "" {
+		return errors.New("empty")
+	}
+	return nil
+}
+`)
+	var out, errOut strings.Builder
+	if code := run([]string{"-dir", dir, "-files", "a.go", "-tally"}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "2 refusals in 1 file(s)") {
+		t.Errorf("the chunk's own count is wrong: %q", got)
+	}
+	if strings.Contains(got, "b.go") {
+		t.Errorf("a file the list did not name was counted: %q", got)
+	}
+	// And the control: the whole package is the larger number, which is the
+	// comparison the flag exists to make.
+	out.Reset()
+	if code := run([]string{"-dir", dir, "-tally"}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "3 refusals in 2 file(s)") {
+		t.Errorf("the package's count is wrong: %q", out.String())
+	}
+}
