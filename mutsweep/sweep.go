@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // verdict is what one deleted guard did to the suite.
@@ -133,7 +134,17 @@ func lastOf(b []byte) string {
 	if len(b) <= keep {
 		return strings.TrimSpace(string(b))
 	}
-	return "…" + strings.TrimSpace(string(b[len(b)-keep:]))
+	b = b[len(b)-keep:]
+	// ⛔ A slice taken from the END can begin in the middle of a rune, and that
+	// half rune makes the whole report invalid UTF-8. A log nobody can grep is
+	// not a report: `grep SURVIVED chunk2.log` printed NOTHING over a sweep
+	// holding three survivors, because grep had decided the file was binary --
+	// and it does not say so on stdout, so the silence reads as "no survivors",
+	// which is the strongest false reassurance a mutation sweep can give.
+	for len(b) > 0 && !utf8.RuneStart(b[0]) {
+		b = b[1:]
+	}
+	return "…" + strings.TrimSpace(string(b))
 }
 
 // one runs a single deletion through mutate, which owns applying it and putting
@@ -283,11 +294,27 @@ func lastLine(s string) string {
 	return lines[len(lines)-1]
 }
 
+// trim bounds a field to n characters -- RUNES, not bytes.
+//
+// ⛔ Cutting at a byte offset splits a multi-byte character in half, and this
+// tool's own output is full of them: the ⛔ and … it prints, and the Go source
+// it quotes back. One half rune makes the report invalid UTF-8, and grep then
+// treats the whole file as binary and matches in silence. See lastOf.
 func trim(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	var count int
+	for i := range s {
+		if count == n-1 {
+			return s[:i] + "…"
+		}
+		count++
+	}
+	return s
 }
 
 // runBounded runs the command and, if the context ends first, kills what it
