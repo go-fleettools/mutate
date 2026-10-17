@@ -30,11 +30,19 @@
 // # WHAT IT DOES
 //
 //	mutsweep [-dir .] [-files a.go,b.go] [-timeout 5m] -- go test ./...
+//	mutsweep [-dir .] [-files a.go,b.go] -tally
 //
 // It walks the syntax tree for an `if` whose body returns a refusal, deletes
 // each one in turn through `mutate`, and prints a line per guard and a summary.
 // It exits non-zero when anything survived or hung, because those are the two
 // answers that need somebody to read them.
+//
+// `-tally` stops before any of that and prints the refusals PER FILE, which is
+// how a campaign too big for one run gets planned in chunks -- and how the
+// chunks get checked against the package afterwards. Adding the chunks up does
+// not do that: collab's root was swept in three runs of 55, 61 and 32, and
+// "148, that closes the root package" was published over a package holding
+// 245.
 //
 // # THE SUITE IS MEASURED ONCE FIRST
 //
@@ -92,6 +100,7 @@ import (
 	"go/build"
 	"io"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -140,5 +149,46 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "mutsweep: no refusal found to delete — the walk is wrong, not the package")
 		return 2
 	}
+	if cfg.tally {
+		return tally(guards, cfg.dir, stdout)
+	}
 	return sweep(cfg, guards, cmd, stdout, stderr)
+}
+
+// tally prints how many refusals each file holds, and stops.
+//
+// ⛔ IT EXISTS BECAUSE A CAMPAIGN RUN IN CHUNKS WAS AUDITED BY ADDING THE
+// CHUNKS UP. go-crdt/collab's root package was swept in three runs of 55, 61
+// and 32 refusals, and "148 refusals, that closes the root package" was
+// published -- while the package holds 245. Ninety-seven refusals in eight
+// files had been in no chunk at all, and the arithmetic could not say so
+// because it never asked the package.
+//
+// `mutsweep -dir . -- true` already prints the TOTAL before running anything,
+// which is what caught it. The total is not enough to plan with: it says how
+// many and never WHICH, so a chunk list could only be checked against a grep
+// of the sweep's own output -- which is why the gap survived a check that had
+// already been written down as the remedy for exactly this.
+func tally(guards []guard, dir string, stdout io.Writer) int {
+	perFile := map[string]int{}
+	for _, g := range guards {
+		perFile[g.file]++
+	}
+	names := make([]string, 0, len(perFile))
+	for f := range perFile {
+		names = append(names, f)
+	}
+	// Most refusals first, because that is the order a campaign gets planned
+	// in; the name as tie-break, so two runs print the same thing.
+	sort.Slice(names, func(i, j int) bool {
+		if perFile[names[i]] != perFile[names[j]] {
+			return perFile[names[i]] > perFile[names[j]]
+		}
+		return names[i] < names[j]
+	})
+	fmt.Fprintf(stdout, "%d refusals in %d file(s) of %s\n", len(guards), len(names), dir)
+	for _, f := range names {
+		fmt.Fprintf(stdout, "  %5d  %s\n", perFile[f], f)
+	}
+	return 0
 }
