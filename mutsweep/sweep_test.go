@@ -9,7 +9,62 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
+
+// ⛔ The report has to stay grep-able, which means VALID UTF-8.
+//
+// Both places this tool shortens text cut at a BYTE offset: `trim`, for the
+// source of a guard and for a failing line, and `lastOf`, for the tail of a
+// suite's output. A line holding a multi-byte character -- a comment in
+// French, a ⛔ in a message, the … this tool prints itself -- was split in
+// half, and grep then treats the whole log as binary: `grep SURVIVED
+// chunk2.log` printed NOTHING over a sweep with three survivors in it. Grep
+// says nothing on stdout about that decision, so the silence reads as "no
+// survivors", which is the one answer a mutation sweep must never give by
+// accident.
+func TestTheReportStaysValidUTF8WhenItShortens(t *testing.T) {
+	// Multi-byte characters only, so every byte offset but the multiples of
+	// three falls inside a rune.
+	const wide = "⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔"
+	for n := 1; n < 20; n++ {
+		got := trim(wide, n)
+		if !utf8.ValidString(got) {
+			t.Errorf("trim(%d) is not valid UTF-8: %q", n, []byte(got))
+		}
+		if utf8.RuneCountInString(got) > n {
+			t.Errorf("trim(%d) kept %d characters, want at most %d", n, utf8.RuneCountInString(got), n)
+		}
+	}
+	// The control: short enough, and nothing is cut at all.
+	if got := trim("⛔⛔", 10); got != "⛔⛔" {
+		t.Errorf("trim shortened something that fitted: %q", got)
+	}
+
+	// lastOf keeps the END, so its slice begins inside a rune instead.
+	got := lastOf([]byte(strings.Repeat("⛔", 700)))
+	if !utf8.ValidString(got) {
+		t.Errorf("lastOf is not valid UTF-8: % x", []byte(got)[:12])
+	}
+	if !strings.HasPrefix(got, "…") {
+		t.Errorf("lastOf did not say that something was cut: %q", got[:12])
+	}
+
+	// And the summary a sweep ends with, which is what gets read and grepped.
+	var out, errOut strings.Builder
+	report([]result{{
+		guard:   guard{file: "stable.go", line: 263, cond: "len(d.seen) == 0 // le témoin ⛔ " + wide},
+		verdict: survived,
+	}}, time.Minute, &out, &errOut)
+	for name, s := range map[string]string{"stdout": out.String(), "stderr": errOut.String()} {
+		if !utf8.ValidString(s) {
+			t.Errorf("the report's %s is not valid UTF-8: %q", name, s)
+		}
+	}
+	if !strings.Contains(errOut.String(), "SURVIVED") {
+		t.Errorf("the verdict is not greppable:\n%s", errOut.String())
+	}
+}
 
 // Each verdict, end to end, against a real `go test` and the real mutate.
 //
