@@ -7,4 +7,8 @@ module github.com/go-fleettools/mutate
 // CI lane reads this very line through `go-version-file: go.mod`, so saying
 // less here also meant a lane running an older toolchain than anybody
 // intended.
-go 1.27.2
+//
+// Raised to 1.27.3 on 2026-10-25 for GO-2026-6809 — crypto/x509, where
+// compromised intermediate certificates are no longer refused by
+// Certificate.Verify — fix RELEASED in 1.27.3. Still within the same minor.
+go 1.27.3
