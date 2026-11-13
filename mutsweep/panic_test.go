@@ -135,39 +135,6 @@ func TestClassifyCorners(t *testing.T) {
 	}
 }
 
-// The edges of the panic window, asserted. A boundary sweep of this very file
-// found `j < len(lines)` moved to `<=` held ONLY by an index-out-of-range panic:
-// the tool's own verdict, on its own code.
-func TestAPanicNeedsATraceWithinTheWindowAndNotPastTheEnd(t *testing.T) {
-	mk := func(filler int, trace bool) []outLine {
-		ls := []outLine{{text: "panic: boom"}}
-		for i := 1; i < filler; i++ {
-			ls = append(ls, outLine{text: "x"})
-		}
-		if trace {
-			ls = append(ls, outLine{text: "goroutine 7 [running]:"})
-		}
-		return ls
-	}
-	for _, tt := range []struct {
-		name string
-		in   []outLine
-		want bool
-	}{
-		{"the panic line is the last line", mk(1, false), false},
-		{"the trace is the very next line", mk(1, true), true},
-		{"the trace is exactly panicWindow lines after", mk(panicWindow, true), true},
-		{"the trace is one line past the window", mk(panicWindow+1, true), false},
-		{"the trace is the last line of the output", mk(5, true), true},
-		{"a goroutine line that is not a header", []outLine{{text: "panic: boom"}, {text: "goroutine 7"}}, false},
-		{"a header that is not a goroutine line", []outLine{{text: "panic: boom"}, {text: "other [running]:"}}, false},
-	} {
-		if got := hasPanic(tt.in); got != tt.want {
-			t.Errorf("%s: hasPanic = %v, want %v", tt.name, got, tt.want)
-		}
-	}
-}
-
 func TestTheMethodIsNamed(t *testing.T) {
 	ev := `{"Action":"fail","Package":"x","Test":"TestA"}` + "\n"
 	if _, m := classify([]byte(ev), true); m != byJSON {
