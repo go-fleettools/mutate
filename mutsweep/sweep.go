@@ -24,6 +24,9 @@ const (
 	noBuild  verdict = "not a mutant"
 	unrun    verdict = "NOT RUN" // mutate itself could not be started
 	hung     verdict = "HUNG"    // no answer in time: held, but only by a timeout
+	// caughtByPanic is red, but only through a runtime panic: no test failed by
+	// an assertion. It is counted apart from caught and read like SURVIVED.
+	caughtByPanic verdict = "caught by PANIC"
 )
 
 type result struct {
@@ -52,8 +55,13 @@ func sweep(cfg config, guards []guard, cmd []string, stdout, stderr io.Writer) i
 	if code != 0 {
 		return code
 	}
-	fmt.Fprintf(stdout, "mutsweep: %d refusals, %v each at most, through %q (the suite itself takes %v)\n",
-		len(guards), cfg.timeout, strings.Join(cmd, " "), base.Round(time.Millisecond))
+	fmt.Fprintf(stdout, "mutsweep: %d %s, %v each at most, through %q (the suite itself takes %v)\n",
+		len(guards), cfg.noun(), cfg.timeout, strings.Join(cmd, " "), base.Round(time.Millisecond))
+	method := byText
+	if asksForJSON(cmd) {
+		method = byJSON
+	}
+	fmt.Fprintf(stdout, "mutsweep: a red suite is read from %s, to tell an assertion from a panic\n", method)
 
 	results := make([]result, 0, len(guards))
 	for i, g := range guards {
@@ -168,6 +176,9 @@ func one(cfg config, g guard, cmd []string) result {
 	defer cancel()
 
 	argv := append([]string{
+		// -echo: a caught mutant's output is what says whether it went red by an
+		// assertion or by a panic, and mutate prints it only when asked.
+		"-echo",
 		"-file", g.pathFrom(runIn),
 		"-from", g.from,
 		"-to", g.to,
@@ -210,7 +221,12 @@ func one(cfg config, g guard, cmd []string) result {
 			r.note += "; " + err.Error()
 		}
 	case err == nil:
-		r.verdict, r.note = caught, took.Round(time.Second).String()
+		var by how
+		r.verdict, by = classify(out, asksForJSON(cmd))
+		r.note = took.Round(time.Second).String()
+		if r.verdict == caughtByPanic {
+			r.note += "  no test failed by an assertion (read from " + string(by) + ")"
+		}
 	case strings.Contains(string(out), "DID NOT COMPILE"):
 		r.verdict, r.note = noBuild, firstBuildError(string(out))
 	case exitCode(err) == 1:
@@ -232,8 +248,8 @@ func report(rs []result, timeout time.Duration, stdout, stderr io.Writer) int {
 	for _, r := range rs {
 		counts[r.verdict]++
 	}
-	fmt.Fprintf(stdout, "\n%d refusals: %d caught, %d not mutants, %d survived, %d hung\n",
-		len(rs), counts[caught], counts[noBuild], counts[survived], counts[hung])
+	fmt.Fprintf(stdout, "\n%d mutations: %d caught, %d caught by PANIC, %d not mutants, %d survived, %d hung\n",
+		len(rs), counts[caught], counts[caughtByPanic], counts[noBuild], counts[survived], counts[hung])
 	if n := counts[unrun]; n > 0 {
 		fmt.Fprintf(stderr, "::error::%d of them never ran: the mutate command could not be started\n", n)
 	}
@@ -242,7 +258,7 @@ func report(rs []result, timeout time.Duration, stdout, stderr io.Writer) int {
 	// of several hundred is a line nobody sees.
 	var needed []result
 	for _, r := range rs {
-		if r.verdict == survived || r.verdict == hung {
+		if r.verdict == survived || r.verdict == hung || r.verdict == caughtByPanic {
 			needed = append(needed, r)
 		}
 	}
@@ -255,7 +271,13 @@ func report(rs []result, timeout time.Duration, stdout, stderr io.Writer) int {
 	sort.Slice(needed, func(i, j int) bool { return needed[i].verdict < needed[j].verdict })
 	fmt.Fprintln(stderr, "\nwhat nothing holds:")
 	for _, r := range needed {
-		fmt.Fprintf(stderr, "  %-10s %s:%d  %s\n", r.verdict, r.file, r.line, trim(r.cond, 70))
+		fmt.Fprintf(stderr, "  %-16s %s:%d  %s\n", r.verdict, r.file, r.line, trim(r.cond, 70))
+	}
+	if counts[caughtByPanic] > 0 {
+		fmt.Fprintln(stderr, "\nA PANIC red is luck, not a test: the suite went red because the code after the")
+		fmt.Fprintln(stderr, "mutation crashed, and no assertion says what the guard is for. The next change")
+		fmt.Fprintln(stderr, "that enlarges the table or adds a check turns it into a survivor, silently.")
+		fmt.Fprintln(stderr, "Write the test that asserts the value on both sides of the guard.")
 	}
 	if counts[hung] > 0 {
 		if slowest, close := nearTheLimit(rs, timeout); close {

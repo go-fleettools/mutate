@@ -220,7 +220,7 @@ func One(n int) error {
 `)
 	mutateBin := buildMutate(t)
 
-	c := exec.Command(bin, "-dir", dir, "-mutate", mutateBin, "--", "true")
+	c := exec.Command(bin, "-dir", dir, "-mutate-bin", mutateBin, "--", "true")
 	c.Env = append(os.Environ(), "MUTSWEEP_ACTIVE=1")
 	out, err := c.CombinedOutput()
 	if err == nil {
@@ -232,7 +232,7 @@ func One(n int) error {
 
 	// The control: without the marker, the same invocation sweeps, so the
 	// refusal above is about the marker and not about the arguments.
-	c2 := exec.Command(bin, "-dir", dir, "-mutate", mutateBin, "--", "true")
+	c2 := exec.Command(bin, "-dir", dir, "-mutate-bin", mutateBin, "--", "true")
 	c2.Env = append(os.Environ(), "MUTSWEEP_ACTIVE=")
 	out2, _ := c2.CombinedOutput()
 	if strings.Contains(string(out2), "refusing to run inside another sweep") {
