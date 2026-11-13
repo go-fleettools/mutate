@@ -247,25 +247,29 @@ what nothing holds:
   caught by PANIC  kn_fast.go:102  x < knFastMaxX  [< to <=]
 ```
 
-The rule is one sentence: **a red suite is `caught` when any test, at any level,
-printed an assertion line; it is `caught by PANIC` when the output holds a panic
-and no test printed an assertion line anywhere.** The first version asked instead
-whether every failing *leaf* test panicked, and was wrong in both directions on
-real go1.27.4 output, which is why its fixtures are now captured from the go tool
-(`mutsweep/testdata/review`) rather than written by hand:
+The rule: **a red suite is `caught by PANIC` when the output holds a panic, unless
+some test that did not panic printed an assertion line.** And **ambiguity resolves
+to PANIC**: a false alarm costs a look at one report line, a false certificate is
+the strongest false reassurance this tool can give. The first versions were wrong
+in both directions on real go1.27.4 output, which is why the fixtures are captured
+from the go tool (`mutsweep/testdata/review`, `review3`) rather than written by
+hand:
 
 - **An assertion line** is what `t.Error`, `t.Fatal` and `t.Log` print: an indented
-  `file_test.go:7: …`. A stack frame is a path followed by ` +0x…`, never `: `. A
-  test that asserts and *then* panics on the next line is `caught`: its assertion
-  is what holds the guard. What a test that **passed** logged (`go test -v`
-  prints it) is not an assertion.
-- **A panic** is a line holding `panic:` that is followed, within a dozen lines, by
-  the runtime's `goroutine N [` trace. The trace is the evidence. A passing test
-  that prints a line beginning `panic:`, or an assertion quoting one, has no trace;
-  and a progress mark printed without a newline, glued to the front of the real
-  report (`.panic: …`), still has one. This covers a panic in a subtest, which
-  test2json files under the *parent*; a panic in a goroutine the code started; and
-  the expiry of `go test -timeout`, neither of which names a failing test.
+  `file_test.go:7: …`. **Text cannot tell `t.Log` from `t.Error`**, so the lines
+  printed by a test that panicked, or by any ancestor of it (test2json files a
+  subtest's panic under its *parent*), are never assertions: `t.Logf("x = %d", x)`
+  and then an index panic is the commonest test there is. A panic value that
+  prints like an assertion line is not one either. What a test that **passed**
+  logged (`go test -v` prints it) does not count.
+- **A panic** is a line holding `panic:` followed, at any distance, by the
+  runtime's `goroutine N [state]:` header; a message of twenty lines, or a 100 KB
+  line that test2json delivers in fragments (joined per test before matching), is
+  still one. A passing test that prints `panic:` and a stack, or an assertion
+  quoting one, is not: only tests not known to have passed count. This covers a
+  panic in a subtest, in a goroutine the code started, and the expiry of
+  `go test -timeout`. A panic that no test can be blamed for taints the package it
+  killed: none of that package's lines count.
 - **Nothing is attributed across packages.** Tests are keyed by package, so
   `a.TestParse`'s assertion is not hidden behind `b.TestParse/edge`'s panic.
 - **Two readings, and the report says which one answered.** When the command is
@@ -280,7 +284,9 @@ real go1.27.4 output, which is why its fixtures are now captured from the go too
   binary, so a test that would have asserted afterwards never runs; and plain
   output without `-v` prints a test's lines only when it finishes, so an
   assertion by a parallel test still running when another panics is lost
-  (`-v` and `-json` stream it). The same mutant can therefore read `caught` or
+  (`-v` and `-json` stream it): **a PANIC from plain output may be a false
+  alarm, and its note says to re-run with `go test -json` to confirm**. The same
+  mutant can therefore read `caught` or
   `caught by PANIC` with `-shuffle`, `-run` or a different package order. A panic
   red is reported as luck because the assertion it needs may simply not have been
   reached: run the failing test alone to ask.
@@ -290,7 +296,10 @@ mutant's output (`mutate -echo`). An older one rejects the flag with exit status
 which is also how it says "did not compile", so every mutant would read as "not a
 mutant" and a gate that ran nothing would pass. `mutsweep` therefore asks `mutate`
 whether it knows `-echo` before the baseline and **refuses with exit 2**; a
-`mutate` that slips past the check is `NOT RUN`, which fails the gate.
+`mutate` that slips past the check is `NOT RUN`, which fails the gate. Only
+mutate's *own* refusal counts (exit 2, and its output *begins* with the flag
+error): a CLI under test whose flag tests print the same phrase does not turn a
+survivor into `NOT RUN`.
 
 ### Boundaries: `-mutate boundary`
 

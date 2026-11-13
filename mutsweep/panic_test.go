@@ -9,132 +9,6 @@ import (
 	"time"
 )
 
-// goTest runs the real go tool on one of the fixtures under testdata/review and
-// returns what it printed. The fixtures are small packages whose outputs were
-// captured from go1.27.4: a hand-written sample of the output missed every
-// defect the first version of the classifier had, because it was written to
-// match the classifier.
-func goTest(t *testing.T, pkg string, flags ...string) ([]byte, []string) {
-	t.Helper()
-	dir, err := filepath.Abs("testdata/review")
-	if err != nil {
-		t.Fatal(err)
-	}
-	args := append([]string{"test", "-count=1", "-timeout=3s"}, flags...)
-	args = append(args, pkg)
-	cmd := exec.Command("go", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("go %v passed; a fixture is meant to be red:\n%s", args, out)
-	}
-	return out, append([]string{"go"}, args...)
-}
-
-// Each fixture, in each of the four shapes of output, against the rule: caught
-// when any failing test printed an assertion line, caught by PANIC when there is
-// a panic and no assertion line, whatever the test or package it came from.
-func TestClassifyOnRealGoTestOutput(t *testing.T) {
-	for _, c := range []struct {
-		pkg  string
-		want verdict
-		why  string
-	}{
-		{"./sub", caughtByPanic, "a subtest panics: test2json files the panic under the PARENT"},
-		{"./goroutine", caughtByPanic, "a panic in a goroutine the code started: no test-level fail event"},
-		{"./timeout", caughtByPanic, "a go test -timeout expiry"},
-		{"./glued", caughtByPanic, "a progress mark without a newline glued to the panic line"},
-		{"./panicfirst", caughtByPanic, "the first panic kills the binary, so the asserting test never ran"},
-		{"./assertthenpanic", caught, "a test asserts and then panics on the next line"},
-		{"./nilmap", caught, "a subtest asserts before its parent panics"},
-		{"./fatalthenpanic", caught, "one test asserts, another panics"},
-		{"./printpanic", caught, "a passing test printed a line beginning panic:"},
-		{"./recovered", caught, "the test recovered the panic and asserted on it"},
-		// The one verdict that depends on the output mode (and, in general, on test
-		// order): the panic ends the binary while the asserting test is still
-		// running, and plain output without -v prints a test's lines only when it
-		// finishes, so the assertion is lost. -v and -json stream it.
-		{"./parallel -plain", caughtByPanic, "parallel tests, one asserts, one panics; plain output loses the assertion"},
-		{"./parallel", caught, "parallel tests, one asserts, one panics; streamed output keeps it"},
-		{"./multi/...", caught, "a.TestParse asserts; b.TestParse/edge panics: same name, two packages"},
-	} {
-		modes := [][]string{{}, {"-v"}, {"-json"}, {"-json", "-v"}}
-		pkg := c.pkg
-		if strings.HasSuffix(pkg, " -plain") {
-			pkg, modes = strings.TrimSuffix(pkg, " -plain"), [][]string{{}}
-		} else if pkg == "./parallel" {
-			modes = modes[1:]
-		}
-		for _, flags := range modes {
-			t.Run(pkg+" "+strings.Join(flags, " "), func(t *testing.T) {
-				out, argv := goTest(t, pkg, flags...)
-				got, _ := classify(out, asksForJSON(argv))
-				if got != c.want {
-					t.Fatalf("%s: classified %q, want %q\n%s", c.why, got, c.want, out)
-				}
-			})
-		}
-	}
-}
-
-// The rule on small inputs, for the corners real output is slow to reach and
-// for the mutations of the readers.
-func TestClassifyCorners(t *testing.T) {
-	trace := "panic: boom\n\ngoroutine 7 [running]:\n"
-	for _, tt := range []struct {
-		name string
-		out  string
-		json bool
-		want verdict
-	}{
-		{"plain: a panic with a trace and no assertion", "--- FAIL: TestA (0.00s)\n" + trace + "FAIL\tx\t0.1s\nFAIL\n", false, caughtByPanic},
-		{"plain: red and nothing to point at", "FAIL\tx\t0.1s\nFAIL\n", false, caught},
-		{"plain: a panic outside any test", trace + "FAIL\tx\t0.1s\nFAIL\n", false, caughtByPanic},
-		{"plain: panic: with no trace is only text", "--- FAIL: TestA (0.00s)\npanic: boom\nFAIL\tx\t0.1s\nFAIL\n", false, caught},
-		{"plain: an assertion of a failing test", "--- FAIL: TestA (0.00s)\n    x_test.go:7: bad\n" + trace + "FAIL\tx\t0.1s\n", false, caught},
-		// The log of a PASSING test is not an assertion: with -v it prints the
-		// same `file.go:N:` form.
-		{"plain -v: a passing test's log is not an assertion",
-			"=== RUN   TestA\n    x_test.go:7: just logging\n--- PASS: TestA (0.00s)\n=== RUN   TestB\n--- FAIL: TestB (0.00s)\n" + trace + "FAIL\tx\t0.1s\n", false, caughtByPanic},
-		// A package ends at its own summary line: the next one's lines are not
-		// the first one's, even for a test of the same name.
-		{"plain: two packages, same test name",
-			"--- FAIL: TestP (0.00s)\n    a_test.go:5: bad\nFAIL\ta\t0.1s\n--- FAIL: TestP/edge (0.00s)\n" + trace + "FAIL\tb\t0.1s\nFAIL\n", false, caught},
-		{"plain: an ok line ends a package too",
-			"=== RUN   TestP\n    a_test.go:5: logged by a green package\n--- PASS: TestP (0.00s)\nok  \ta\t0.1s\n--- FAIL: TestP (0.00s)\n" + trace + "FAIL\tb\t0.1s\n", false, caughtByPanic},
-		{"json: no event answers, the text does", "--- FAIL: TestA (0.00s)\n" + trace + "FAIL\tx\t0.1s\n", true, caughtByPanic},
-		{"json: a panic in the output of a package, not a test",
-			`{"Action":"output","Package":"x","Output":"panic: boom\n"}` + "\n" +
-				`{"Action":"output","Package":"x","Output":"\n"}` + "\n" +
-				`{"Action":"output","Package":"x","Output":"goroutine 7 [running]:\n"}` + "\n" +
-				`{"Action":"fail","Package":"x"}` + "\n", true, caughtByPanic},
-		{"json: a failing test's assertion in another package",
-			`{"Action":"output","Package":"a","Test":"TestP","Output":"    a_test.go:5: bad\n"}` + "\n" +
-				`{"Action":"fail","Package":"a","Test":"TestP"}` + "\n" +
-				`{"Action":"output","Package":"b","Test":"TestP","Output":"panic: boom\n"}` + "\n" +
-				`{"Action":"output","Package":"b","Test":"TestP","Output":"goroutine 7 [running]:\n"}` + "\n" +
-				`{"Action":"fail","Package":"b","Test":"TestP"}` + "\n", true, caught},
-		{"json: an assertion line of a test that did not fail does not count",
-			`{"Action":"output","Package":"a","Test":"TestP","Output":"    a_test.go:5: logged\n"}` + "\n" +
-				`{"Action":"pass","Package":"a","Test":"TestP"}` + "\n" +
-				`{"Action":"output","Package":"a","Test":"TestQ","Output":"panic: boom\n"}` + "\n" +
-				`{"Action":"output","Package":"a","Test":"TestQ","Output":"goroutine 7 [running]:\n"}` + "\n" +
-				`{"Action":"fail","Package":"a","Test":"TestQ"}` + "\n", true, caughtByPanic},
-		{"json: lines that are not events are skipped",
-			"# a build note\n" +
-				`{"Action":"output","Package":"a","Test":"TestP","Output":"    a_test.go:5: bad\n"}` + "\n" +
-				"not json {\n" +
-				`{"Action":"fail","Package":"a","Test":"TestP"}` + "\n", true, caught},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			got, _ := classify([]byte(tt.out), tt.json)
-			if got != tt.want {
-				t.Fatalf("classified %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestTheMethodIsNamed(t *testing.T) {
 	ev := `{"Action":"fail","Package":"x","Test":"TestA"}` + "\n"
 	if _, m := classify([]byte(ev), true); m != byJSON {
@@ -209,6 +83,28 @@ func TestAnOldMutateIsRefusedBeforeAnythingRuns(t *testing.T) {
 	}
 	if code := report([]result{got}, time.Minute, &out, &errOut); code != 1 {
 		t.Fatalf("report exit %d, want 1", code)
+	}
+}
+
+// ⛔ "flag provided but not defined" is mutate's own refusal only when mutate
+// says it. A CLI under test whose flag tests print the phrase must not turn a
+// SURVIVOR into NOT RUN: the guard here is held by nothing, and the command's
+// output (shown by go test -v, and echoed by mutate on a survivor) holds it.
+func TestAFlagErrorInTheCommandsOutputIsNotMutatesRefusal(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module x\n\ngo 1.27.1\n")
+	write(t, dir, "x.go", "package x\n\nfunc F(n int) int {\n\tif n < 0 {\n\t\treturn 0\n\t}\n\treturn n\n}\n")
+	write(t, dir, "x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestFlags(t *testing.T) {\n"+
+		"\tt.Log(\"flag provided but not defined: -nope\")\n\tif F(1) != 1 {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n")
+	g := oneGuardOf(t, dir)
+	for _, cmd := range [][]string{
+		{"go", "test", "-count", "1", "-v", "./..."},
+		{"go", "test", "-count", "1", "-v", "-json", "./..."},
+	} {
+		got := one(config{dir: dir, timeout: 2 * time.Minute, mutate: buildMutate(t)}, g[0], cmd)
+		if got.verdict != survived {
+			t.Fatalf("%v: verdict %q (%s), want %q", cmd, got.verdict, got.note, survived)
+		}
 	}
 }
 

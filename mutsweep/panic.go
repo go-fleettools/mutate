@@ -23,28 +23,42 @@ import (
 // held. A panic red is luck: the next change that enlarges the table makes the
 // mutant survive, silently.
 //
-// The rule, in one sentence: a red suite is CAUGHT when any failing test, at any
-// level, printed an assertion line; it is CAUGHT BY PANIC when the output holds a
-// panic and no failing test printed an assertion line anywhere.
+// ⛔ AMBIGUITY RESOLVES TO PANIC. A false alarm costs one look at a report; a
+// false certificate is the strongest false reassurance this tool can give. Every
+// rule below is written so that when the output cannot say, the answer is
+// `caught by PANIC`.
 //
-// It is written that way, and not as "every failing leaf test panicked", because
-// the first version was wrong in both directions on real go1.27.4 output:
+// The rule: a red suite is CAUGHT BY PANIC when the output holds a panic, and
+// CAUGHT when it holds none, or when some test that did not panic printed an
+// assertion line. The lines a test printed are NOT assertions when that test
+// panicked, or when it is an ancestor of one that did, or -- when the panic cannot
+// be attributed to a test at all -- when they belong to the package it killed.
 //
-//   - test2json files a subtest's panic under the PARENT test, not the leaf, so
-//     dropping parents as "not leaves" dropped the only test that panicked;
+// Text cannot tell t.Log from t.Error: both print `file_test.go:7: ...`. So
+// `t.Logf("x = %d", x)` followed by an index panic would read as an assertion
+// if the lines of the test that panicked counted, and every test that logs
+// progress would be certified. They do not count.
+//
+// The first versions were wrong in both directions on real go1.27.4 output, and
+// the fixtures are now the real thing (testdata/review, testdata/review3):
+//
+//   - test2json files a subtest's panic under the PARENT test, so a rule about
+//     "leaf tests" dropped the only test that panicked;
 //   - a panic with no test-level fail event (a `go test -timeout` expiry, a panic
-//     in a goroutine the code under test started) named no failing test at all;
-//   - a test that asserted and THEN panicked on the next line was read as luck,
-//     when its assertion is exactly what holds the guard;
-//   - a passing test that printed a line beginning `panic:` flipped the verdict;
-//   - plain output across packages attached no package, so one package's
-//     assertion was hidden behind another package's panic of the same test name.
+//     in a goroutine the code started) named no failing test at all;
+//   - a fixed window for the goroutine trace missed a panic message of twenty
+//     lines, and a panic line of 100 KB that test2json delivers in fragments;
+//   - a panic value that prints like an assertion line was read as one;
+//   - a stack dump printed by a test that PASSED was read as a panic.
 //
 // ⛔ THE VERDICT DEPENDS ON WHICH TESTS RAN. The first panic ends its test
 // binary, so a test that would have asserted afterwards never runs, and the
 // verdict can differ with test order (-shuffle, -run, a different package order).
 // A panic red is reported as luck because the assertion it needs may simply not
-// have been reached; run the failing test alone to ask.
+// have been reached; run the failing test alone to ask. Plain output without
+// -v is the weakest reading: it prints a test's lines only when the test
+// finishes, so the assertion of a parallel test still running when another
+// panics is lost, and the report says so.
 
 // how says which way a red suite was read, because the two are not equally
 // exact and the report has to say which one it used.
@@ -88,11 +102,6 @@ type testKey struct{ pkg, test string }
 // indented. A stack frame is a path followed by ` +0x`, never `: `.
 var assertionLine = regexp.MustCompile(`^\s+[^\s:]+\.go:\d+: `)
 
-// panicWindow is how far after a `panic:` line the runtime's `goroutine N [`
-// header has to appear for the line to be a real panic. A passing test that
-// prints the word, or a subprocess's stderr copied through, has no trace.
-const panicWindow = 12
-
 // classify reads what a red suite said and returns caught or caughtByPanic.
 //
 // Nothing found to point at is CAUGHT, never panic: the claim that a guard is
@@ -117,38 +126,68 @@ func classify(out []byte, asJSON bool) (verdict, how) {
 }
 
 // decide is the rule itself, kept apart from both readers.
-//
-// An assertion line counts unless its test is known to have PASSED. It is "not
-// passed", and not "failed", because a test still running when a panic ends the
-// binary never gets a fail event, and its assertion is no less one for that.
-// What a passing test logs (go test -v prints it) is not an assertion.
 func decide(lines []outLine, passed map[testKey]bool) verdict {
+	tainted, killed, found := panicked(lines, passed)
+	if !found {
+		return caught
+	}
 	for _, l := range lines {
-		if !passed[testKey{l.pkg, l.test}] && assertionLine.MatchString(l.text) {
+		k := testKey{l.pkg, l.test}
+		if passed[k] || tainted[k] || killed[l.pkg] {
+			continue
+		}
+		if assertionLine.MatchString(l.text) {
 			return caught
 		}
 	}
-	if hasPanic(lines) {
-		return caughtByPanic
-	}
-	return caught
+	return caughtByPanic
 }
 
-// hasPanic is whether any line is the Go runtime's report of a panic: a line
-// holding `panic:` that is followed by a goroutine trace. The trace is the
-// evidence, not the position in the line: a test that prints a progress mark
-// without a newline glues it to the front of the real report (`.panic: ...`),
-// while an assertion quoting a panic, or a passing test printing the word, has
-// no trace after it.
-func hasPanic(lines []outLine) bool {
+// panicked finds the panics in the output, from tests not known to have passed.
+//
+// A panic is a line holding `panic:` followed, at any distance, by the runtime's
+// `goroutine N [state]:` header. The header is the evidence; a fixed distance to
+// it is not, because a panic message can run to any number of lines. A passing
+// test that prints the word, or a stack dump, is not a panic of the suite: it did
+// not fail by it.
+//
+// It returns the tests whose lines are not assertions (the test the panic is
+// filed under and all its ancestors, since test2json files a subtest's panic
+// under its parent), the packages in which a panic could not be filed under any
+// test, and whether there was a panic at all.
+func panicked(lines []outLine, passed map[testKey]bool) (tainted map[testKey]bool, killed map[string]bool, found bool) {
+	tainted, killed = map[testKey]bool{}, map[string]bool{}
 	for i, l := range lines {
-		if !strings.Contains(l.text, "panic:") {
+		if !strings.Contains(l.text, "panic:") || passed[testKey{l.pkg, l.test}] {
 			continue
 		}
-		for j := i + 1; j < len(lines) && j <= i+panicWindow; j++ {
-			if strings.HasPrefix(lines[j].text, "goroutine ") && strings.Contains(lines[j].text, " [") {
-				return true
+		if !traceFollows(lines[i+1:]) {
+			continue
+		}
+		found = true
+		if l.test == "" {
+			killed[l.pkg] = true
+			continue
+		}
+		// The test and each ancestor: TestX/sub/leaf taints TestX/sub and TestX.
+		for name := l.test; name != ""; {
+			tainted[testKey{l.pkg, name}] = true
+			cut := strings.LastIndexByte(name, '/')
+			if cut < 0 {
+				break
 			}
+			name = name[:cut]
+		}
+	}
+	return tainted, killed, found
+}
+
+// traceFollows is whether a `goroutine N [state]:` header comes after.
+func traceFollows(rest []outLine) bool {
+	for _, l := range rest {
+		if strings.HasPrefix(l.text, "goroutine ") && strings.Contains(l.text, " [") &&
+			strings.HasSuffix(strings.TrimSpace(l.text), "]:") {
+			return true
 		}
 	}
 	return false
@@ -162,8 +201,13 @@ type event struct {
 	Output  string
 }
 
+// readEvents reads `go test -json` output. test2json splits a long line into
+// several output events, so fragments are joined per test until the newline: a
+// 100 KB panic line is one line, not forty.
 func readEvents(out []byte) (lines []outLine, passed map[testKey]bool, ok bool) {
 	passed = map[testKey]bool{}
+	pending := map[testKey]string{}
+	var order []testKey
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	sc.Buffer(make([]byte, 1<<20), 16<<20)
 	for sc.Scan() {
@@ -176,15 +220,32 @@ func readEvents(out []byte) (lines []outLine, passed map[testKey]bool, ok bool) 
 			continue
 		}
 		ok = true
+		k := testKey{e.Package, e.Test}
 		switch e.Action {
 		case "output":
-			for _, text := range strings.Split(strings.TrimSuffix(e.Output, "\n"), "\n") {
-				lines = append(lines, outLine{e.Package, e.Test, text})
+			if _, open := pending[k]; !open {
+				order = append(order, k)
 			}
+			text := pending[k] + e.Output
+			for {
+				nl := strings.IndexByte(text, '\n')
+				if nl < 0 {
+					break
+				}
+				lines = append(lines, outLine{k.pkg, k.test, text[:nl]})
+				text = text[nl+1:]
+			}
+			pending[k] = text
 		case "pass", "skip":
 			if e.Test != "" {
-				passed[testKey{e.Package, e.Test}] = true
+				passed[k] = true
 			}
+		}
+	}
+	// A last line with no newline is still a line.
+	for _, k := range order {
+		if rest := pending[k]; rest != "" {
+			lines = append(lines, outLine{k.pkg, k.test, rest})
 		}
 	}
 	return lines, passed, ok

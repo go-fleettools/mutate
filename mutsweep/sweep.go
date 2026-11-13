@@ -250,8 +250,17 @@ func one(cfg config, g guard, cmd []string) result {
 		r.note = took.Round(time.Second).String()
 		if r.verdict == caughtByPanic {
 			r.note += "  no test failed by an assertion (read from " + string(by) + ")"
+			if by == byText {
+				// Plain output without -v prints a test's lines only when it
+				// finishes, so a parallel test's assertion can be lost to the
+				// panic: this PANIC may be a false alarm, never the reverse.
+				r.note += "; plain output can lose an assertion, re-run with go test -json to confirm"
+			}
 		}
-	case strings.Contains(string(out), "flag provided but not defined"):
+	case exitCode(err) == 2 && strings.HasPrefix(string(out), "flag provided but not defined"):
+		// mutate's OWN refusal, which is the first thing it prints and exits 2.
+		// Never the command's output: a CLI's flag tests print this phrase too,
+		// and a survivor must not turn into NOT RUN because of them.
 		// A mutate that does not know a flag mutsweep passes: nothing ran, and
 		// that is a statement about this machine, never about the code.
 		r.verdict, r.note = unrun, "mutate rejected a flag: "+trim(strings.TrimSpace(lastLine(string(out))), 70)
