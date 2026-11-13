@@ -281,15 +281,36 @@ hand:
   exits 1, a vet failure — stays `caught`: the claim that a guard is held only by
   luck needs a panic to point at.
 - **⛔ The verdict depends on which tests ran.** The first panic ends its test
-  binary, so a test that would have asserted afterwards never runs; and plain
-  output without `-v` prints a test's lines only when it finishes, so an
-  assertion by a parallel test still running when another panics is lost
-  (`-v` and `-json` stream it): **a PANIC from plain output may be a false
-  alarm, and its note says to re-run with `go test -json` to confirm**. The same
-  mutant can therefore read `caught` or
-  `caught by PANIC` with `-shuffle`, `-run` or a different package order. A panic
-  red is reported as luck because the assertion it needs may simply not have been
-  reached: run the failing test alone to ask.
+  binary, so a test that would have asserted afterwards never runs. The same
+  mutant can therefore read `caught` or `caught by PANIC` with `-shuffle`, `-run`
+  or a different package order. A panic red is reported as luck because the
+  assertion it needs may simply not have been reached: run the failing test alone
+  to ask.
+- **An assertion line counts only from a test that FAILED**, by a `fail` event or
+  a `--- FAIL` line of its own, and that did not panic. A test that is merely not
+  known to have passed may be one still running when the panic ended the binary,
+  logging progress, and would have passed: its `t.Log` is not an assertion.
+
+#### Known false alarms (safe direction)
+
+Each of these reads `caught by PANIC` when a real assertion exists. They are kept,
+because telling them apart would take parsing the frames of the output, and a
+false alarm costs a look at one line where a false certificate costs the whole
+point of the tool. A PANIC from plain output carries the note *re-run with
+`go test -json` to confirm*.
+
+- **A real assertion hidden behind a subtest panic** (`nilmap`): the subtest
+  asserts, then the parent panics, and plain, `-v` and `-json -v` file the parent's
+  panic under the subtest that ran last.
+- **A parallel test that asserted but was still running** (`parallel`): the panic
+  ends the binary before it reports its own failure, so nothing says it failed.
+- **A test that asserts and then panics in the same test** (`assertthenpanic`):
+  its lines cannot be told from `t.Log`.
+- **A failing `Example` next to a panic in another package**: an Example's failure
+  is a `got:`/`want:` block, not a `file.go:N:` line.
+- **`b.Fatal` next to a panicking benchmark**, in plain output.
+- **A stack dump printed by a passing test**, in plain output without `-v`, where
+  nothing says which test printed it (`stackdump`).
 
 This needs the `mutate` that comes with it: `mutsweep` asks it to print a caught
 mutant's output (`mutate -echo`). An older one rejects the flag with exit status 2,

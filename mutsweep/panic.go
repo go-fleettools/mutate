@@ -125,7 +125,15 @@ func classify(out []byte, asJSON bool) (verdict, how) {
 	return decide(lines, passed), method
 }
 
-// decide is the rule itself, kept apart from both readers.
+// decide is the rule itself, kept apart from both readers. `passed` holds the
+// verdict of each test that reported one: true for a pass or a skip, false for a
+// fail, absent for a test that never reported (still running when a panic ended
+// the binary).
+//
+// ⛔ An assertion line counts only from a test that FAILED, by a fail event or a
+// `--- FAIL` line of its own. A test that is merely not known to have passed
+// may be one that was still running, logging progress, and would have passed:
+// its t.Log is not an assertion.
 func decide(lines []outLine, passed map[testKey]bool) verdict {
 	tainted, killed, found := panicked(lines, passed)
 	if !found {
@@ -133,7 +141,7 @@ func decide(lines []outLine, passed map[testKey]bool) verdict {
 	}
 	for _, l := range lines {
 		k := testKey{l.pkg, l.test}
-		if passed[k] || tainted[k] || killed[l.pkg] {
+		if ok, reported := passed[k]; !reported || ok || tainted[k] || killed[l.pkg] {
 			continue
 		}
 		if assertionLine.MatchString(l.text) {
@@ -240,6 +248,10 @@ func readEvents(out []byte) (lines []outLine, passed map[testKey]bool, ok bool) 
 			if e.Test != "" {
 				passed[k] = true
 			}
+		case "fail":
+			if e.Test != "" {
+				passed[k] = false
+			}
 		}
 	}
 	// A last line with no newline is still a line.
@@ -270,6 +282,7 @@ func readText(out []byte) (lines []outLine, passed map[testKey]bool) {
 		switch {
 		case strings.HasPrefix(trimmed, "--- FAIL: "):
 			test = firstField(strings.TrimPrefix(trimmed, "--- FAIL: "))
+			passed[testKey{pkg, test}] = false
 		case strings.HasPrefix(trimmed, "--- "):
 			// PASS and SKIP: the lines around it belong to a test that did not fail.
 			test = firstField(trimmed[strings.IndexByte(trimmed, ':')+1:])

@@ -59,8 +59,11 @@ func TestClassifyOnRealGoTestOutput(t *testing.T) {
 		{"review", "./printpanic", all, caught, "a passing test printed a line beginning panic:"},
 		{"review", "./recovered", all, caught, "the test recovered the panic and asserted on it"},
 		{"review", "./multi/...", all, caught, "a.TestParse asserts; b.TestParse/edge panics: same name, two packages"},
-		{"review", "./parallel", streamed, caught, "parallel tests, one asserts, one panics; streamed output keeps it"},
-		{"review", "./parallel", all[:1], caughtByPanic, "plain output loses the assertion of a test still running: a false alarm, never the reverse"},
+		{"review", "./parallel", all, caughtByPanic, "an asserting test still running when the other panics reports no fail of its own: a false alarm, never the reverse"},
+		// review4: round three.
+		{"review4", "./parlog", all, caughtByPanic, "a parallel test logging progress, still running when another panics, would have passed"},
+		{"review4", "./helper", all, caught, "t.Fatal inside a t.Helper fails its test; a later test panics"},
+		{"review4", "./sibling", all, caught, "one subtest asserts, its sibling panics"},
 		// review3: round two. Every one of these was a panic certified as caught.
 		{"review3", "./tlog", all, caughtByPanic, "t.Logf then a panic: text cannot tell t.Log from t.Error"},
 		{"review3", "./sublog", all, caughtByPanic, "the parent logs, only its subtest panics"},
@@ -111,6 +114,13 @@ func TestClassifyCorners(t *testing.T) {
 		{"plain: the test that panicked printed it", "--- FAIL: TestA (0.00s)\n    x_test.go:7: bad\n" + trace + "FAIL\tx\t0.1s\n", false, caughtByPanic},
 		{"plain: a panic message of twenty lines", "--- FAIL: TestA (0.00s)\npanic: " + long + "\ngoroutine 7 [running]:\nFAIL\tx\t0.1s\n", false, caughtByPanic},
 
+		// A test that never reported a result was still running when the panic ended
+		// the binary: what it logged is not an assertion.
+		{"plain -v: a test still running",
+			"=== RUN   TestA\n    x_test.go:7: warming the cache\n=== RUN   TestB\n--- FAIL: TestB (0.00s)\n" + trace + "FAIL\tx\t0.1s\n", false, caughtByPanic},
+		{"json: a test still running",
+			ev("output", "a", "TestA", "    a_test.go:5: warming the cache\n") + ev("output", "a", "TestB", "panic: boom\n") +
+				ev("output", "a", "TestB", "goroutine 7 [running]:\n") + ev("fail", "a", "TestB", ""), true, caughtByPanic},
 		// What a test that PASSED printed is not an assertion (go test -v shows it).
 		{"plain -v: a passing test's log",
 			"=== RUN   TestA\n    x_test.go:7: just logging\n--- PASS: TestA (0.00s)\n=== RUN   TestB\n--- FAIL: TestB (0.00s)\n" + trace + "FAIL\tx\t0.1s\n", false, caughtByPanic},
