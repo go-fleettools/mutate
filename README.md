@@ -33,7 +33,7 @@ mutsweep: 38 refusals, 3m0s each at most, through "go test ./..."
 [15/38] SURVIVED    blob.go:347  used <= 0  12s
 ...
 
-38 refusals: 15 caught, 21 not mutants, 2 survived, 0 hung
+38 mutations: 15 caught, 0 caught by PANIC, 21 not mutants, 2 survived, 0 hung
 
 what nothing holds:
   SURVIVED   blob.go:347  used <= 0
@@ -66,7 +66,7 @@ mutsweep: 5 refusals, 2m0s each at most, through "go test -count 1 ./..."
 [4/5] SURVIVED     map.go:861  !ok  13s
 [5/5] SURVIVED     map.go:1002  len(b) == 0  14s
 
-5 refusals: 2 caught, 0 not mutants, 2 survived, 1 hung
+5 mutations: 2 caught, 0 caught by PANIC, 0 not mutants, 2 survived, 1 hung
 ```
 
 That is a real run, and it is the answer to a report: those five lines were
@@ -205,28 +205,103 @@ slower rather than stuck. Re-run them alone against a test that names the guard:
 
 The baseline costs one run of the command, against one per guard.
 
-### Four verdicts, because two is not enough
+### Five verdicts, because two is not enough
 
 | verdict | meaning |
 | --- | --- |
-| **caught** | the suite went red: the guard is held |
+| **caught** | the suite went red, and at least one test failed through an assertion: the guard is held |
+| **caught by PANIC** | the suite went red, but every test that failed did so through a runtime panic and none through an assertion: held by luck, and **listed with the survivors** |
 | **SURVIVED** | the suite stayed green: nothing holds it |
 | **not a mutant** | the deletion did not compile. On real code this is often **half** of everything tried — 242 of 574 — and counting it either way is wrong |
 | **HUNG** | no answer in time. The guard is load-bearing *and* nothing says so: a timeout names no cause and costs a runner its whole budget |
+
+`caught`, `caught by PANIC`, `SURVIVED` and `HUNG` are the ones that decide the
+exit status: it is **non-zero** when anything survived, hung, or was caught only
+by a panic, so a sweep can stand as a CI gate.
 
 `HUNG` is not a theoretical category. Deleting the check that a retry policy
 is honourable does not fail a suite; it makes the suite wait out an hour
 somebody mistyped into the wrong field.
 
+### A panic is not an assertion
+
+*"The suite went red"* has two causes, and only one of them is a test. A test that
+asserts fails because it compared a value with the one it expected. A test that
+merely walks past the guard fails because the code after it indexed past an array,
+dereferenced nil or divided by zero — a crash no author wrote an expectation for.
+
+Twice in one day in `go-numerics/special` the only thing that made a mutated range
+guard red was such a panic (`x < 512` written `x <= 512` failed only with `index
+out of range`, special#71, and `x < jyFastMaxX` the same way, special#73), and a
+sweep that counts any red as caught reported both as held. **A panic red is
+luck**: the next change that enlarges the table makes the mutant survive,
+silently. So a red suite is read once more:
+
+```console
+[5/5] caught by PANIC kn_fast.go:102  x < knFastMaxX  [< to <=]  1s  no test failed by an assertion (read from go test -json events)
+
+5 mutations: 3 caught, 1 caught by PANIC, 0 not mutants, 1 survived, 0 hung
+
+what nothing holds:
+  SURVIVED         kn_fast.go:89  s <= math.MaxFloat64  [<= to <]
+  caught by PANIC  kn_fast.go:102  x < knFastMaxX  [< to <=]
+```
+
+- **A leaf test is what counts.** A parent test fails because its subtest did, so
+  only the tests with no failing subtest are read; the verdict is a panic only when
+  *all* of those failed through one. One assertion among the panics and it is
+  `caught`, because something does say what the guard is for.
+- **Where a panic is recognised.** A line that *begins* with `panic:`, which is how
+  the Go runtime prints one (it includes `panic: test timed out` from `go test
+  -timeout`). A test that logs the word, or an assertion that quotes it, is
+  indented or prefixed by a file position, and does not count.
+- **Two readings, and the report says which one answered.** When the command is
+  `go test` with `-json`, the events say which test printed each line. Otherwise
+  the plain output is read: a panic line belongs to the `--- FAIL:` line above it.
+  That is a reading of prose, so the header of every sweep names the method
+  (`a red suite is read from go test -json events`).
+- **No evidence is not luck.** A red suite that names no failing test — a
+  `TestMain` that exits 1, a vet failure — stays `caught`: the claim that a guard
+  is held only by luck needs a panic to point at.
+
+This needs the `mutate` that comes with it: `mutsweep` asks it to print a caught
+mutant's output (`mutate -echo`), which an earlier one does not understand.
+
+### Boundaries: `-mutate boundary`
+
+Deleting a refusal is the wrong mutation for a range guard. The defects found in
+`special` were all **boundary** ones, and deleting `if x < 512 { return … }`
+fails a suite for a quite different reason than moving it one step does.
+
+```console
+$ mutsweep -mutate boundary -files kn_fast.go -- go test -json ./...
+```
+
+For each comparison in a refusal's condition, and in a `for` loop's, it tries the
+other side of the edge: `<` to `<=`, `<=` to `<`, `>` to `>=`, `>=` to `>`. A
+condition with two comparisons gives two mutations; `==` and `!=` are not
+boundaries. Deletion stays the default (`-mutate delete`).
+
+Each mutation is addressed exactly as a deletion is: the text up to and including
+the operator, widened with preceding source until it occurs once in the file, so
+two identical `if n < 3` in one file are two mutations rather than one ambiguity.
+A target for `-only` is the line of the operator, as the report prints it, and
+names every mutation on that line.
+
+The command that `mutsweep` drives is now `-mutate-bin` (it was `-mutate`, which
+is the kind of mutation). Nothing else about the report changes: the same five
+verdicts, the same baseline before anything is mutated.
+
 ### The taxonomy is not invented here
 
 PIT, the mutation testing tool for Java, has reported these outcomes for years,
-and four of them are the four above under other names
+and four of them are four of the five above under other names
 ([pitest.org, *Basic concepts*](https://pitest.org/quickstart/basic_concepts)):
 
 | PIT | here | PIT's definition |
 | --- | --- | --- |
 | Killed | caught | "A test caught the mutation successfully." |
+| Killed | caught by PANIC | none of PIT's outcomes in this table separates it: it is a refinement of Killed, for a kill that no test's assertion made |
 | Survived | SURVIVED | "The mutation was not detected by the covering test." |
 | Timed Out | HUNG | "A mutation may time out if it causes an infinite loop, such as removing the increment from a counter in a for loop." |
 | Non viable | not a mutant | "could not be loaded by the JVM as the bytecode was in some way invalid" |
