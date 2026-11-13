@@ -55,6 +55,8 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	from := fs.String("from", "", "exact text to replace (not a pattern)")
 	to := fs.String("to", "", "what to replace it with")
 	name := fs.String("name", "", "what this mutation is, for the report")
+	echo := fs.Bool("echo", false,
+		"on a caught mutation, print the command's output to stdout. For mutsweep, which reads it to tell an assertion from a panic")
 	wantPass := fs.Bool("expect-pass", false,
 		"invert: succeed when the command still PASSES. For a mutation that must NOT matter")
 	if err := fs.Parse(argv); err != nil {
@@ -99,6 +101,9 @@ func run(argv []string, stdout, stderr io.Writer) int {
 
 	passed := runErr == nil
 	if passed == *wantPass {
+		if *echo {
+			fmt.Fprint(stdout, string(out))
+		}
 		fmt.Fprintf(stdout, "mutate: %s — %s\n", m.label(), verdict(*wantPass))
 		return 0
 	}

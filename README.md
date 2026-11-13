@@ -33,7 +33,7 @@ mutsweep: 38 refusals, 3m0s each at most, through "go test ./..."
 [15/38] SURVIVED    blob.go:347  used <= 0  12s
 ...
 
-38 refusals: 15 caught, 21 not mutants, 2 survived, 0 hung
+38 mutations: 15 caught, 0 caught by PANIC, 21 not mutants, 2 survived, 0 hung
 
 what nothing holds:
   SURVIVED   blob.go:347  used <= 0
@@ -66,7 +66,7 @@ mutsweep: 5 refusals, 2m0s each at most, through "go test -count 1 ./..."
 [4/5] SURVIVED     map.go:861  !ok  13s
 [5/5] SURVIVED     map.go:1002  len(b) == 0  14s
 
-5 refusals: 2 caught, 0 not mutants, 2 survived, 1 hung
+5 mutations: 2 caught, 0 caught by PANIC, 0 not mutants, 2 survived, 1 hung
 ```
 
 That is a real run, and it is the answer to a report: those five lines were
@@ -205,28 +205,158 @@ slower rather than stuck. Re-run them alone against a test that names the guard:
 
 The baseline costs one run of the command, against one per guard.
 
-### Four verdicts, because two is not enough
+### Five verdicts, because two is not enough
 
 | verdict | meaning |
 | --- | --- |
-| **caught** | the suite went red: the guard is held |
+| **caught** | the suite went red, and some test printed an assertion line (or nothing panicked): the guard is held |
+| **caught by PANIC** | the suite went red, the output holds a runtime panic and no test printed an assertion line: held by luck, and **listed with the survivors** |
 | **SURVIVED** | the suite stayed green: nothing holds it |
 | **not a mutant** | the deletion did not compile. On real code this is often **half** of everything tried — 242 of 574 — and counting it either way is wrong |
 | **HUNG** | no answer in time. The guard is load-bearing *and* nothing says so: a timeout names no cause and costs a runner its whole budget |
+
+`caught`, `caught by PANIC`, `SURVIVED` and `HUNG` are the ones that decide the
+exit status: it is **non-zero** when anything survived, hung, or was caught only
+by a panic, so a sweep can stand as a CI gate.
 
 `HUNG` is not a theoretical category. Deleting the check that a retry policy
 is honourable does not fail a suite; it makes the suite wait out an hour
 somebody mistyped into the wrong field.
 
+### A panic is not an assertion
+
+*"The suite went red"* has two causes, and only one of them is a test. A test that
+asserts fails because it compared a value with the one it expected. A test that
+merely walks past the guard fails because the code after it indexed past an array,
+dereferenced nil or divided by zero — a crash no author wrote an expectation for.
+
+Twice in one day in `go-numerics/special` the only thing that made a mutated range
+guard red was such a panic (`x < 512` written `x <= 512` failed only with `index
+out of range`, special#71, and `x < jyFastMaxX` the same way, special#73), and a
+sweep that counts any red as caught reported both as held. **A panic red is
+luck**: the next change that enlarges the table makes the mutant survive,
+silently. So a red suite is read once more:
+
+```console
+[5/5] caught by PANIC kn_fast.go:102  x < knFastMaxX  [< to <=]  1s  no test failed by an assertion (read from go test -json events)
+
+5 mutations: 3 caught, 1 caught by PANIC, 0 not mutants, 1 survived, 0 hung
+
+what nothing holds:
+  SURVIVED         kn_fast.go:89  s <= math.MaxFloat64  [<= to <]
+  caught by PANIC  kn_fast.go:102  x < knFastMaxX  [< to <=]
+```
+
+The rule: **a red suite is `caught by PANIC` when the output holds a panic, unless
+some test that did not panic printed an assertion line.** And **ambiguity resolves
+to PANIC**: a false alarm costs a look at one report line, a false certificate is
+the strongest false reassurance this tool can give. The first versions were wrong
+in both directions on real go1.27.4 output, which is why the fixtures are captured
+from the go tool (`mutsweep/testdata/review`, `review3`) rather than written by
+hand:
+
+- **An assertion line** is what `t.Error`, `t.Fatal` and `t.Log` print: an indented
+  `file_test.go:7: …`. **Text cannot tell `t.Log` from `t.Error`**, so the lines
+  printed by a test that panicked, or by any ancestor of it (test2json files a
+  subtest's panic under its *parent*), are never assertions: `t.Logf("x = %d", x)`
+  and then an index panic is the commonest test there is. A panic value that
+  prints like an assertion line is not one either. What a test that **passed**
+  logged (`go test -v` prints it) does not count.
+- **A panic** is a line holding `panic:` followed, at any distance, by the
+  runtime's `goroutine N [state]:` header; a message of twenty lines, or a 100 KB
+  line that test2json delivers in fragments (joined per test before matching), is
+  still one. A passing test that prints `panic:` and a stack, or an assertion
+  quoting one, is not: only tests not known to have passed count. This covers a
+  panic in a subtest, in a goroutine the code started, and the expiry of
+  `go test -timeout`. A panic that no test can be blamed for taints the package it
+  killed: none of that package's lines count.
+- **Nothing is attributed across packages.** Tests are keyed by package, so
+  `a.TestParse`'s assertion is not hidden behind `b.TestParse/edge`'s panic.
+- **Two readings, and the report says which one answered.** When the command is
+  `go test` with `-json`, the events say which package and test printed each line.
+  Otherwise the plain output is read, and a line belongs to the test named by the
+  last `=== RUN` or `--- FAIL:` line before it, within one package. That is a
+  reading of prose, so the header of every sweep names the method.
+- **No evidence is not luck.** A red suite with no panic in it — a `TestMain` that
+  exits 1, a vet failure — stays `caught`: the claim that a guard is held only by
+  luck needs a panic to point at.
+- **⛔ The verdict depends on which tests ran.** The first panic ends its test
+  binary, so a test that would have asserted afterwards never runs. The same
+  mutant can therefore read `caught` or `caught by PANIC` with `-shuffle`, `-run`
+  or a different package order. A panic red is reported as luck because the
+  assertion it needs may simply not have been reached: run the failing test alone
+  to ask.
+- **An assertion line counts only from a test that FAILED**, by a `fail` event or
+  a `--- FAIL` line of its own, and that did not panic. A test that is merely not
+  known to have passed may be one still running when the panic ended the binary,
+  logging progress, and would have passed: its `t.Log` is not an assertion.
+
+#### Known false alarms (safe direction)
+
+Each of these reads `caught by PANIC` when a real assertion exists. They are kept,
+because telling them apart would take parsing the frames of the output, and a
+false alarm costs a look at one line where a false certificate costs the whole
+point of the tool. A PANIC from plain output carries the note *re-run with
+`go test -json` to confirm*.
+
+- **A real assertion hidden behind a subtest panic** (`nilmap`): the subtest
+  asserts, then the parent panics, and plain, `-v` and `-json -v` file the parent's
+  panic under the subtest that ran last.
+- **A parallel test that asserted but was still running** (`parallel`): the panic
+  ends the binary before it reports its own failure, so nothing says it failed.
+- **A test that asserts and then panics in the same test** (`assertthenpanic`):
+  its lines cannot be told from `t.Log`.
+- **A failing `Example` next to a panic in another package**: an Example's failure
+  is a `got:`/`want:` block, not a `file.go:N:` line.
+- **`b.Fatal` next to a panicking benchmark**, in plain output.
+- **A stack dump printed by a passing test**, in plain output without `-v`, where
+  nothing says which test printed it (`stackdump`).
+
+This needs the `mutate` that comes with it: `mutsweep` asks it to print a caught
+mutant's output (`mutate -echo`). An older one rejects the flag with exit status 2,
+which is also how it says "did not compile", so every mutant would read as "not a
+mutant" and a gate that ran nothing would pass. `mutsweep` therefore asks `mutate`
+whether it knows `-echo` before the baseline and **refuses with exit 2**; a
+`mutate` that slips past the check is `NOT RUN`, which fails the gate. Only
+mutate's *own* refusal counts (exit 2, and its output *begins* with the flag
+error): a CLI under test whose flag tests print the same phrase does not turn a
+survivor into `NOT RUN`.
+
+### Boundaries: `-mutate boundary`
+
+Deleting a refusal is the wrong mutation for a range guard. The defects found in
+`special` were all **boundary** ones, and deleting `if x < 512 { return … }`
+fails a suite for a quite different reason than moving it one step does.
+
+```console
+$ mutsweep -mutate boundary -files kn_fast.go -- go test -json ./...
+```
+
+For each comparison in a refusal's condition, and in a `for` loop's, it tries the
+other side of the edge: `<` to `<=`, `<=` to `<`, `>` to `>=`, `>=` to `>`. A
+condition with two comparisons gives two mutations; `==` and `!=` are not
+boundaries. Deletion stays the default (`-mutate delete`).
+
+Each mutation is addressed exactly as a deletion is: the text up to and including
+the operator, widened with preceding source until it occurs once in the file, so
+two identical `if n < 3` in one file are two mutations rather than one ambiguity.
+A target for `-only` is the line of the operator, as the report prints it, and
+names every mutation on that line.
+
+The command that `mutsweep` drives is now `-mutate-bin` (it was `-mutate`, which
+is the kind of mutation). Nothing else about the report changes: the same five
+verdicts, the same baseline before anything is mutated.
+
 ### The taxonomy is not invented here
 
 PIT, the mutation testing tool for Java, has reported these outcomes for years,
-and four of them are the four above under other names
+and four of them are four of the five above under other names
 ([pitest.org, *Basic concepts*](https://pitest.org/quickstart/basic_concepts)):
 
 | PIT | here | PIT's definition |
 | --- | --- | --- |
 | Killed | caught | "A test caught the mutation successfully." |
+| Killed | caught by PANIC | none of PIT's outcomes in this table separates it: it is a refinement of Killed, for a kill that no test's assertion made |
 | Survived | SURVIVED | "The mutation was not detected by the covering test." |
 | Timed Out | HUNG | "A mutation may time out if it causes an infinite loop, such as removing the increment from a counter in a for loop." |
 | Non viable | not a mutant | "could not be loaded by the JVM as the bytecode was in some way invalid" |

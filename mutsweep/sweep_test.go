@@ -400,6 +400,7 @@ func main() {
 	from := flag.String("from", "", "")
 	to := flag.String("to", "", "")
 	flag.String("name", "", "")
+	flag.Bool("echo", false, "")
 	flag.Parse()
 	b, err := os.ReadFile(*file)
 	if err != nil {

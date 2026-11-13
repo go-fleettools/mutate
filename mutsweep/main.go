@@ -44,6 +44,26 @@
 // "148, that closes the root package" was published over a package holding
 // 245.
 //
+// # FIVE VERDICTS
+//
+// caught, SURVIVED, not a mutant, HUNG -- and caught by PANIC: the suite went
+// red, the output holds a runtime panic and no test printed an assertion line.
+// That is luck, not a test: the next change that enlarges
+// the table makes the mutant survive silently. It is counted apart from caught,
+// listed under "what nothing holds", and makes the exit status non-zero. A
+// `go test -json` command is read from its events; any other from its text, and
+// the report says which.
+//
+// # BOUNDARY MUTATIONS
+//
+//	mutsweep -mutate boundary -- go test ./...
+//
+// Deleting a refusal is the wrong mutation for a range guard, whose defects are
+// off-by-one ones: `x < 512` written `x <= 512`. -mutate boundary moves each
+// comparison in a refusal's condition, and in a for loop's, to the other side of
+// its edge: < to <=, <= to <, > to >=, >= to >. Each is addressed as a deletion
+// is, widened with preceding source until it occurs once.
+//
 // # THE SUITE IS MEASURED ONCE FIRST
 //
 // Before anything is deleted, the command runs unmutated. Two wrong answers
@@ -150,7 +170,7 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if cfg.tally {
-		return tally(guards, cfg.dir, stdout)
+		return tally(guards, cfg.dir, cfg.noun(), stdout)
 	}
 	return sweep(cfg, guards, cmd, stdout, stderr)
 }
@@ -169,7 +189,7 @@ func run(argv []string, stdout, stderr io.Writer) int {
 // many and never WHICH, so a chunk list could only be checked against a grep
 // of the sweep's own output -- which is why the gap survived a check that had
 // already been written down as the remedy for exactly this.
-func tally(guards []guard, dir string, stdout io.Writer) int {
+func tally(guards []guard, dir, noun string, stdout io.Writer) int {
 	perFile := map[string]int{}
 	for _, g := range guards {
 		perFile[g.file]++
@@ -186,7 +206,7 @@ func tally(guards []guard, dir string, stdout io.Writer) int {
 		}
 		return names[i] < names[j]
 	})
-	fmt.Fprintf(stdout, "%d refusals in %d file(s) of %s\n", len(guards), len(names), dir)
+	fmt.Fprintf(stdout, "%d %s in %d file(s) of %s\n", len(guards), noun, len(names), dir)
 	for _, f := range names {
 		fmt.Fprintf(stdout, "  %5d  %s\n", perFile[f], f)
 	}

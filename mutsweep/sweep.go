@@ -24,6 +24,9 @@ const (
 	noBuild  verdict = "not a mutant"
 	unrun    verdict = "NOT RUN" // mutate itself could not be started
 	hung     verdict = "HUNG"    // no answer in time: held, but only by a timeout
+	// caughtByPanic is red, but only through a runtime panic: no test failed by
+	// an assertion. It is counted apart from caught and read like SURVIVED.
+	caughtByPanic verdict = "caught by PANIC"
 )
 
 type result struct {
@@ -48,12 +51,21 @@ const marginOverBaseline = 3
 
 // sweep deletes each guard in turn and reports what the suite did about it.
 func sweep(cfg config, guards []guard, cmd []string, stdout, stderr io.Writer) int {
+	if err := supportsEcho(cfg.mutate); err != nil {
+		fmt.Fprintln(stderr, "mutsweep:", err)
+		return 2
+	}
 	base, code := baseline(cfg, cmd, stderr)
 	if code != 0 {
 		return code
 	}
-	fmt.Fprintf(stdout, "mutsweep: %d refusals, %v each at most, through %q (the suite itself takes %v)\n",
-		len(guards), cfg.timeout, strings.Join(cmd, " "), base.Round(time.Millisecond))
+	fmt.Fprintf(stdout, "mutsweep: %d %s, %v each at most, through %q (the suite itself takes %v)\n",
+		len(guards), cfg.noun(), cfg.timeout, strings.Join(cmd, " "), base.Round(time.Millisecond))
+	method := byText
+	if asksForJSON(cmd) {
+		method = byJSON
+	}
+	fmt.Fprintf(stdout, "mutsweep: a red suite is read from %s, to tell an assertion from a panic\n", method)
 
 	results := make([]result, 0, len(guards))
 	for i, g := range guards {
@@ -63,6 +75,26 @@ func sweep(cfg config, guards []guard, cmd []string, stdout, stderr io.Writer) i
 			i+1, len(guards), r.verdict, g.file, g.line, trim(g.cond, 60), r.note)
 	}
 	return report(results, cfg.timeout, stdout, stderr)
+}
+
+// supportsEcho asks the mutate command whether it understands -echo, which
+// mutsweep passes on every mutant.
+//
+// ⛔ An older mutate rejects the flag with exit status 2, which is also how it says
+// "the mutant did not compile": every mutant of a sweep read as "not a mutant",
+// which does not fail the gate, so a sweep that RAN NOTHING exited 0. Asked first,
+// so that is refused before any time is spent.
+func supportsEcho(bin string) error {
+	out, err := exec.Command(bin, "-h").CombinedOutput()
+	if err != nil && exitCode(err) < 0 {
+		return fmt.Errorf("could not run %q: %v", bin, err)
+	}
+	if !strings.Contains(string(out), "-echo") {
+		return fmt.Errorf("%q does not understand -echo, which mutsweep needs to tell a panic from an assertion "+
+			"— every mutant would be rejected and nothing would run; install the mutate that comes with this mutsweep "+
+			"(go install github.com/go-fleettools/mutate@latest)", bin)
+	}
+	return nil
 }
 
 // baseline runs the command once with nothing mutated, which is the measurement
@@ -168,6 +200,9 @@ func one(cfg config, g guard, cmd []string) result {
 	defer cancel()
 
 	argv := append([]string{
+		// -echo: a caught mutant's output is what says whether it went red by an
+		// assertion or by a panic, and mutate prints it only when asked.
+		"-echo",
 		"-file", g.pathFrom(runIn),
 		"-from", g.from,
 		"-to", g.to,
@@ -210,7 +245,25 @@ func one(cfg config, g guard, cmd []string) result {
 			r.note += "; " + err.Error()
 		}
 	case err == nil:
-		r.verdict, r.note = caught, took.Round(time.Second).String()
+		var by how
+		r.verdict, by = classify(out, asksForJSON(cmd))
+		r.note = took.Round(time.Second).String()
+		if r.verdict == caughtByPanic {
+			r.note += "  no test failed by an assertion (read from " + string(by) + ")"
+			if by == byText {
+				// Plain output without -v prints a test's lines only when it
+				// finishes, so a parallel test's assertion can be lost to the
+				// panic: this PANIC may be a false alarm, never the reverse.
+				r.note += "; plain output can lose an assertion, re-run with go test -json to confirm"
+			}
+		}
+	case exitCode(err) == 2 && strings.HasPrefix(string(out), "flag provided but not defined"):
+		// mutate's OWN refusal, which is the first thing it prints and exits 2.
+		// Never the command's output: a CLI's flag tests print this phrase too,
+		// and a survivor must not turn into NOT RUN because of them.
+		// A mutate that does not know a flag mutsweep passes: nothing ran, and
+		// that is a statement about this machine, never about the code.
+		r.verdict, r.note = unrun, "mutate rejected a flag: "+trim(strings.TrimSpace(lastLine(string(out))), 70)
 	case strings.Contains(string(out), "DID NOT COMPILE"):
 		r.verdict, r.note = noBuild, firstBuildError(string(out))
 	case exitCode(err) == 1:
@@ -232,8 +285,8 @@ func report(rs []result, timeout time.Duration, stdout, stderr io.Writer) int {
 	for _, r := range rs {
 		counts[r.verdict]++
 	}
-	fmt.Fprintf(stdout, "\n%d refusals: %d caught, %d not mutants, %d survived, %d hung\n",
-		len(rs), counts[caught], counts[noBuild], counts[survived], counts[hung])
+	fmt.Fprintf(stdout, "\n%d mutations: %d caught, %d caught by PANIC, %d not mutants, %d survived, %d hung\n",
+		len(rs), counts[caught], counts[caughtByPanic], counts[noBuild], counts[survived], counts[hung])
 	if n := counts[unrun]; n > 0 {
 		fmt.Fprintf(stderr, "::error::%d of them never ran: the mutate command could not be started\n", n)
 	}
@@ -242,7 +295,7 @@ func report(rs []result, timeout time.Duration, stdout, stderr io.Writer) int {
 	// of several hundred is a line nobody sees.
 	var needed []result
 	for _, r := range rs {
-		if r.verdict == survived || r.verdict == hung {
+		if r.verdict == survived || r.verdict == hung || r.verdict == caughtByPanic {
 			needed = append(needed, r)
 		}
 	}
@@ -255,7 +308,13 @@ func report(rs []result, timeout time.Duration, stdout, stderr io.Writer) int {
 	sort.Slice(needed, func(i, j int) bool { return needed[i].verdict < needed[j].verdict })
 	fmt.Fprintln(stderr, "\nwhat nothing holds:")
 	for _, r := range needed {
-		fmt.Fprintf(stderr, "  %-10s %s:%d  %s\n", r.verdict, r.file, r.line, trim(r.cond, 70))
+		fmt.Fprintf(stderr, "  %-16s %s:%d  %s\n", r.verdict, r.file, r.line, trim(r.cond, 70))
+	}
+	if counts[caughtByPanic] > 0 {
+		fmt.Fprintln(stderr, "\nA PANIC red is luck, not a test: the suite went red because the code after the")
+		fmt.Fprintln(stderr, "mutation crashed, and no assertion says what the guard is for. The next change")
+		fmt.Fprintln(stderr, "that enlarges the table or adds a check turns it into a survivor, silently.")
+		fmt.Fprintln(stderr, "Write the test that asserts the value on both sides of the guard.")
 	}
 	if counts[hung] > 0 {
 		if slowest, close := nearTheLimit(rs, timeout); close {

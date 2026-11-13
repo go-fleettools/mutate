@@ -11,4 +11,6 @@ module github.com/go-fleettools/mutate
 // Raised to 1.27.3 on 2026-10-25 for GO-2026-6809 — crypto/x509, where
 // compromised intermediate certificates are no longer refused by
 // Certificate.Verify — fix RELEASED in 1.27.3. Still within the same minor.
-go 1.27.3
+//
+// Raised to 1.27.4 on 2026-11-13 for GO-2026-6859 — fix RELEASED in 1.27.4.
+go 1.27.4

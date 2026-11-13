@@ -24,7 +24,29 @@ type config struct {
 	only    []target
 	timeout time.Duration
 	mutate  string
-	tally   bool // count per file and stop, running nothing
+	tally   bool   // count per file and stop, running nothing
+	mode    string // what to do to each refusal: modeDelete (the default) or modeBoundary
+}
+
+const (
+	modeDelete   = "delete"
+	modeBoundary = "boundary"
+)
+
+func (c config) boundary() bool { return c.mode == modeBoundary }
+
+// noun is what a sweep counts: a refusal is deleted, a comparison is moved.
+func (c config) noun() string {
+	if c.boundary() {
+		return "comparisons"
+	}
+	return "refusals"
+}
+
+// flipped is the boundary mutation of a comparison operator: the same test one
+// step to the other side of the edge. Equality is not a boundary.
+var flipped = map[token.Token]string{
+	token.LSS: "<=", token.LEQ: "<", token.GTR: ">=", token.GEQ: ">",
 }
 
 // target names one refusal the way a report prints it: the file as -files
@@ -71,11 +93,21 @@ func parse(argv []string, stderr io.Writer) (config, []string, int) {
 		"refusal in the package. A target matching no refusal is an error, because a\n"+
 		"sweep that quietly swept nothing reads as a clean one")
 	fs.DurationVar(&cfg.timeout, "timeout", 5*time.Minute, "how long one mutant may run before it is called HUNG")
-	fs.StringVar(&cfg.mutate, "mutate", "mutate", "the mutate command to drive")
+	fs.StringVar(&cfg.mutate, "mutate-bin", "mutate", "the mutate command to drive")
+	fs.StringVar(&cfg.mode, "mutate", modeDelete, "what to do to each refusal: `delete` it (the default), or\n"+
+		"`boundary`: move each comparison in a refusal's condition, and in a for\n"+
+		"loop's, to the other side of its edge (< to <=, <= to <, > to >=, >= to >).\n"+
+		"Deleting a refusal is the wrong mutation for a range guard, whose defects are\n"+
+		"off-by-one ones")
 	fs.BoolVar(&cfg.tally, "tally", false, "count the refusals per FILE and stop, running nothing.\n"+
 		"For planning a campaign in chunks, and for checking afterwards that the chunks\n"+
 		"covered the package: no command is needed with it")
 	if err := fs.Parse(argv); err != nil {
+		return cfg, nil, 2
+	}
+	if cfg.mode != modeDelete && cfg.mode != modeBoundary {
+		fmt.Fprintf(stderr, "mutsweep: -mutate %q: it is %s or %s (the mutate COMMAND is now -mutate-bin)\n",
+			cfg.mode, modeDelete, modeBoundary)
 		return cfg, nil, 2
 	}
 	if *files != "" {
@@ -246,6 +278,13 @@ func collect(cfg config) ([]guard, []string, error) {
 				list = v.Body
 			case *ast.CommClause:
 				list = v.Body
+			case *ast.ForStmt:
+				// A loop's own condition is an edge too: the walk that stops one
+				// element early or late is the off-by-one a table bound hides.
+				if cfg.boundary() && v.Cond != nil {
+					out = append(out, boundaries(cfg.dir, p, fset, string(src), v.Cond)...)
+				}
+				return true
 			default:
 				return true
 			}
@@ -255,6 +294,10 @@ func collect(cfg config) ([]guard, []string, error) {
 					continue
 				}
 				if _, isReturn := ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt); !isReturn {
+					continue
+				}
+				if cfg.boundary() {
+					out = append(out, boundaries(cfg.dir, p, fset, string(src), ifs.Cond)...)
 					continue
 				}
 				start := fset.Position(ifs.Pos())
@@ -301,11 +344,17 @@ func keepOnly(all []guard, want []target) ([]guard, error) {
 	var out []guard
 	for _, g := range all {
 		t := target{file: g.file, line: g.line}
+		// Every mutation on the line, once: a boundary sweep may hold several
+		// comparisons on one line, and a target names the line.
+		var hit bool
 		for _, w := range want {
-			if w == t && !found[t] {
+			if w == t {
 				found[t] = true
-				out = append(out, g)
+				hit = true
 			}
+		}
+		if hit {
+			out = append(out, g)
 		}
 	}
 	var missing []string
@@ -319,6 +368,43 @@ func keepOnly(all []guard, want []target) ([]guard, error) {
 			len(missing), strings.Join(missing, ", "))
 	}
 	return out, nil
+}
+
+// boundaries makes one mutation per comparison in a condition: the operator
+// moved to the other side of its edge.
+//
+// Each is addressed as a deletion is: the text from the operator back to the
+// start of as many lines as it takes to occur once in the file, with the same
+// text but for the operator as its replacement. The operator itself is the
+// span's end, so a `<` is never confused with the `<` of a `<=` elsewhere --
+// the widening makes the whole of it unique.
+func boundaries(dir, file string, fset *token.FileSet, src string, cond ast.Expr) []guard {
+	var out []guard
+	ast.Inspect(cond, func(n ast.Node) bool {
+		b, ok := n.(*ast.BinaryExpr)
+		if !ok {
+			return true
+		}
+		flip, ok := flipped[b.Op]
+		if !ok {
+			return true
+		}
+		pos := fset.Position(b.OpPos)
+		end := pos.Offset + len(b.Op.String())
+		from, to := unique(src, pos.Offset, end)
+		var c strings.Builder
+		printer.Fprint(&c, fset, b)
+		out = append(out, guard{
+			dir:  dir,
+			file: file,
+			line: pos.Line,
+			cond: fmt.Sprintf("%s  [%s to %s]", strings.Join(strings.Fields(c.String()), " "), b.Op, flip),
+			from: from,
+			to:   to + flip,
+		})
+		return true
+	})
+	return out
 }
 
 // unique widens a span backwards, a line at a time, until the text it covers
