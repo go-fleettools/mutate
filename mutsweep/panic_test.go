@@ -2,77 +2,129 @@ package main
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-// Real output of a suite with one assertion failure (in a subtest) and one test
-// that indexed past a table, captured from the go tool.
-const plainBoth = `--- FAIL: TestAssert (0.00s)
-    --- FAIL: TestAssert/sub (0.00s)
-        x_test.go:7: bad
---- FAIL: TestPanic (0.00s)
-panic: runtime error: index out of range [3] with length 3 [recovered, repanicked]
+// goTest runs the real go tool on one of the fixtures under testdata/review and
+// returns what it printed. The fixtures are small packages whose outputs were
+// captured from go1.27.4: a hand-written sample of the output missed every
+// defect the first version of the classifier had, because it was written to
+// match the classifier.
+func goTest(t *testing.T, pkg string, flags ...string) ([]byte, []string) {
+	t.Helper()
+	dir, err := filepath.Abs("testdata/review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := append([]string{"test", "-count=1", "-timeout=3s"}, flags...)
+	args = append(args, pkg)
+	cmd := exec.Command("go", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("go %v passed; a fixture is meant to be red:\n%s", args, out)
+	}
+	return out, append([]string{"go"}, args...)
+}
 
-goroutine 7 [running]:
-x.TestPanic(0x32b6c7fd66c8?)
-	/src/x_test.go:10 +0x38
-FAIL	x	0.054s
-FAIL
-`
+// Each fixture, in each of the four shapes of output, against the rule: caught
+// when any failing test printed an assertion line, caught by PANIC when there is
+// a panic and no assertion line, whatever the test or package it came from.
+func TestClassifyOnRealGoTestOutput(t *testing.T) {
+	for _, c := range []struct {
+		pkg  string
+		want verdict
+		why  string
+	}{
+		{"./sub", caughtByPanic, "a subtest panics: test2json files the panic under the PARENT"},
+		{"./goroutine", caughtByPanic, "a panic in a goroutine the code started: no test-level fail event"},
+		{"./timeout", caughtByPanic, "a go test -timeout expiry"},
+		{"./glued", caughtByPanic, "a progress mark without a newline glued to the panic line"},
+		{"./panicfirst", caughtByPanic, "the first panic kills the binary, so the asserting test never ran"},
+		{"./assertthenpanic", caught, "a test asserts and then panics on the next line"},
+		{"./nilmap", caught, "a subtest asserts before its parent panics"},
+		{"./fatalthenpanic", caught, "one test asserts, another panics"},
+		{"./printpanic", caught, "a passing test printed a line beginning panic:"},
+		{"./recovered", caught, "the test recovered the panic and asserted on it"},
+		// The one verdict that depends on the output mode (and, in general, on test
+		// order): the panic ends the binary while the asserting test is still
+		// running, and plain output without -v prints a test's lines only when it
+		// finishes, so the assertion is lost. -v and -json stream it.
+		{"./parallel -plain", caughtByPanic, "parallel tests, one asserts, one panics; plain output loses the assertion"},
+		{"./parallel", caught, "parallel tests, one asserts, one panics; streamed output keeps it"},
+		{"./multi/...", caught, "a.TestParse asserts; b.TestParse/edge panics: same name, two packages"},
+	} {
+		modes := [][]string{{}, {"-v"}, {"-json"}, {"-json", "-v"}}
+		pkg := c.pkg
+		if strings.HasSuffix(pkg, " -plain") {
+			pkg, modes = strings.TrimSuffix(pkg, " -plain"), [][]string{{}}
+		} else if pkg == "./parallel" {
+			modes = modes[1:]
+		}
+		for _, flags := range modes {
+			t.Run(pkg+" "+strings.Join(flags, " "), func(t *testing.T) {
+				out, argv := goTest(t, pkg, flags...)
+				got, _ := classify(out, asksForJSON(argv))
+				if got != c.want {
+					t.Fatalf("%s: classified %q, want %q\n%s", c.why, got, c.want, out)
+				}
+			})
+		}
+	}
+}
 
-const plainPanicOnly = `--- FAIL: TestPanic (0.00s)
-panic: runtime error: index out of range [4] with length 4 [recovered, repanicked]
-
-goroutine 7 [running]:
-FAIL	x	0.054s
-FAIL
-`
-
-const plainAssertOnly = `--- FAIL: TestAssert (0.00s)
-    x_test.go:7: bad
-    x_test.go:9: the log says panic: but only indented
-FAIL
-FAIL	x	0.003s
-`
-
-const jsonPanicOnly = `{"Action":"start","Package":"x"}
-{"Action":"run","Package":"x","Test":"TestPanic"}
-{"Action":"output","Package":"x","Test":"TestPanic","Output":"--- FAIL: TestPanic (0.00s)\n"}
-{"Action":"output","Package":"x","Test":"TestPanic","Output":"panic: runtime error: index out of range [3] with length 3 [recovered, repanicked]\n"}
-{"Action":"fail","Package":"x","Test":"TestPanic","Elapsed":0}
-{"Action":"fail","Package":"x","Elapsed":0.152}
-`
-
-const jsonBoth = jsonPanicOnly + `{"Action":"run","Package":"x","Test":"TestAssert/sub"}
-{"Action":"output","Package":"x","Test":"TestAssert/sub","Output":"    x_test.go:7: bad\n"}
-{"Action":"fail","Package":"x","Test":"TestAssert/sub","Elapsed":0}
-{"Action":"fail","Package":"x","Test":"TestAssert","Elapsed":0}
-`
-
-// The rule, against both readings of the same facts.
-func TestClassifyTellsAnAssertionFromAPanic(t *testing.T) {
+// The rule on small inputs, for the corners real output is slow to reach and
+// for the mutations of the readers.
+func TestClassifyCorners(t *testing.T) {
+	trace := "panic: boom\n\ngoroutine 7 [running]:\n"
 	for _, tt := range []struct {
 		name string
 		out  string
 		json bool
 		want verdict
 	}{
-		{"plain: a panic and an assertion", plainBoth, false, caught},
-		{"plain: a panic alone", plainPanicOnly, false, caughtByPanic},
-		{"plain: an assertion alone, quoting a panic indented", plainAssertOnly, false, caught},
-		{"json: a panic alone", jsonPanicOnly, true, caughtByPanic},
-		{"json: a panic and an assertion", jsonBoth, true, caught},
-		// A red suite naming no failing test offers no evidence of luck.
-		{"plain: red, but no test named", "FAIL\tx\t0.1s\nFAIL\n", false, caught},
-		// A panic in a goroutine of its own ends the process before any test is
-		// reported failed.
-		{"plain: a panic outside any test", "panic: boom\n\ngoroutine 5 [running]:\nFAIL\tx\t0.1s\nFAIL\n", false, caughtByPanic},
-		{"json: the plain reading answers when no event does", plainPanicOnly, true, caughtByPanic},
-		// A parent fails because its subtest did; only the subtest counts.
-		{"plain: a panicking subtest under a failing parent",
-			"--- FAIL: TestA (0.00s)\n    --- FAIL: TestA/sub (0.00s)\npanic: boom\nFAIL\tx\t0.1s\nFAIL\n", false, caughtByPanic},
+		{"plain: a panic with a trace and no assertion", "--- FAIL: TestA (0.00s)\n" + trace + "FAIL\tx\t0.1s\nFAIL\n", false, caughtByPanic},
+		{"plain: red and nothing to point at", "FAIL\tx\t0.1s\nFAIL\n", false, caught},
+		{"plain: a panic outside any test", trace + "FAIL\tx\t0.1s\nFAIL\n", false, caughtByPanic},
+		{"plain: panic: with no trace is only text", "--- FAIL: TestA (0.00s)\npanic: boom\nFAIL\tx\t0.1s\nFAIL\n", false, caught},
+		{"plain: an assertion of a failing test", "--- FAIL: TestA (0.00s)\n    x_test.go:7: bad\n" + trace + "FAIL\tx\t0.1s\n", false, caught},
+		// The log of a PASSING test is not an assertion: with -v it prints the
+		// same `file.go:N:` form.
+		{"plain -v: a passing test's log is not an assertion",
+			"=== RUN   TestA\n    x_test.go:7: just logging\n--- PASS: TestA (0.00s)\n=== RUN   TestB\n--- FAIL: TestB (0.00s)\n" + trace + "FAIL\tx\t0.1s\n", false, caughtByPanic},
+		// A package ends at its own summary line: the next one's lines are not
+		// the first one's, even for a test of the same name.
+		{"plain: two packages, same test name",
+			"--- FAIL: TestP (0.00s)\n    a_test.go:5: bad\nFAIL\ta\t0.1s\n--- FAIL: TestP/edge (0.00s)\n" + trace + "FAIL\tb\t0.1s\nFAIL\n", false, caught},
+		{"plain: an ok line ends a package too",
+			"=== RUN   TestP\n    a_test.go:5: logged by a green package\n--- PASS: TestP (0.00s)\nok  \ta\t0.1s\n--- FAIL: TestP (0.00s)\n" + trace + "FAIL\tb\t0.1s\n", false, caughtByPanic},
+		{"json: no event answers, the text does", "--- FAIL: TestA (0.00s)\n" + trace + "FAIL\tx\t0.1s\n", true, caughtByPanic},
+		{"json: a panic in the output of a package, not a test",
+			`{"Action":"output","Package":"x","Output":"panic: boom\n"}` + "\n" +
+				`{"Action":"output","Package":"x","Output":"\n"}` + "\n" +
+				`{"Action":"output","Package":"x","Output":"goroutine 7 [running]:\n"}` + "\n" +
+				`{"Action":"fail","Package":"x"}` + "\n", true, caughtByPanic},
+		{"json: a failing test's assertion in another package",
+			`{"Action":"output","Package":"a","Test":"TestP","Output":"    a_test.go:5: bad\n"}` + "\n" +
+				`{"Action":"fail","Package":"a","Test":"TestP"}` + "\n" +
+				`{"Action":"output","Package":"b","Test":"TestP","Output":"panic: boom\n"}` + "\n" +
+				`{"Action":"output","Package":"b","Test":"TestP","Output":"goroutine 7 [running]:\n"}` + "\n" +
+				`{"Action":"fail","Package":"b","Test":"TestP"}` + "\n", true, caught},
+		{"json: an assertion line of a test that did not fail does not count",
+			`{"Action":"output","Package":"a","Test":"TestP","Output":"    a_test.go:5: logged\n"}` + "\n" +
+				`{"Action":"pass","Package":"a","Test":"TestP"}` + "\n" +
+				`{"Action":"output","Package":"a","Test":"TestQ","Output":"panic: boom\n"}` + "\n" +
+				`{"Action":"output","Package":"a","Test":"TestQ","Output":"goroutine 7 [running]:\n"}` + "\n" +
+				`{"Action":"fail","Package":"a","Test":"TestQ"}` + "\n", true, caughtByPanic},
+		{"json: lines that are not events are skipped",
+			"# a build note\n" +
+				`{"Action":"output","Package":"a","Test":"TestP","Output":"    a_test.go:5: bad\n"}` + "\n" +
+				"not json {\n" +
+				`{"Action":"fail","Package":"a","Test":"TestP"}` + "\n", true, caught},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, _ := classify([]byte(tt.out), tt.json)
@@ -83,14 +135,48 @@ func TestClassifyTellsAnAssertionFromAPanic(t *testing.T) {
 	}
 }
 
+// The edges of the panic window, asserted. A boundary sweep of this very file
+// found `j < len(lines)` moved to `<=` held ONLY by an index-out-of-range panic:
+// the tool's own verdict, on its own code.
+func TestAPanicNeedsATraceWithinTheWindowAndNotPastTheEnd(t *testing.T) {
+	mk := func(filler int, trace bool) []outLine {
+		ls := []outLine{{text: "panic: boom"}}
+		for i := 1; i < filler; i++ {
+			ls = append(ls, outLine{text: "x"})
+		}
+		if trace {
+			ls = append(ls, outLine{text: "goroutine 7 [running]:"})
+		}
+		return ls
+	}
+	for _, tt := range []struct {
+		name string
+		in   []outLine
+		want bool
+	}{
+		{"the panic line is the last line", mk(1, false), false},
+		{"the trace is the very next line", mk(1, true), true},
+		{"the trace is exactly panicWindow lines after", mk(panicWindow, true), true},
+		{"the trace is one line past the window", mk(panicWindow+1, true), false},
+		{"the trace is the last line of the output", mk(5, true), true},
+		{"a goroutine line that is not a header", []outLine{{text: "panic: boom"}, {text: "goroutine 7"}}, false},
+		{"a header that is not a goroutine line", []outLine{{text: "panic: boom"}, {text: "other [running]:"}}, false},
+	} {
+		if got := hasPanic(tt.in); got != tt.want {
+			t.Errorf("%s: hasPanic = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
 func TestTheMethodIsNamed(t *testing.T) {
-	if _, m := classify([]byte(jsonPanicOnly), true); m != byJSON {
+	ev := `{"Action":"fail","Package":"x","Test":"TestA"}` + "\n"
+	if _, m := classify([]byte(ev), true); m != byJSON {
 		t.Errorf("events read as %q", m)
 	}
-	if _, m := classify([]byte(plainPanicOnly), false); m != byText {
+	if _, m := classify([]byte("--- FAIL: TestA\n"), false); m != byText {
 		t.Errorf("text read as %q", m)
 	}
-	if _, m := classify([]byte(plainPanicOnly), true); m != byText {
+	if _, m := classify([]byte("--- FAIL: TestA\n"), true); m != byText {
 		t.Errorf("a command that said -json but spoke text must be reported as read from text, got %q", m)
 	}
 }
@@ -100,10 +186,12 @@ func TestOnlyGoTestWithJSONIsReadAsEvents(t *testing.T) {
 		"go test -json ./...":             true,
 		"go test -count 1 -json ./...":    true,
 		"/usr/local/go/bin/go test -json": true,
+		"go test -json=true ./...":        true,
 		"go test ./...":                   false,
 		"go vet -json ./...":              false,
 		"make test -json":                 false,
 		"go test -run X -- -json":         false,
+		"go":                              false,
 	} {
 		if got := asksForJSON(strings.Fields(cmd)); got != want {
 			t.Errorf("%q: asksForJSON = %v, want %v", cmd, got, want)
@@ -125,6 +213,71 @@ func TestAPanicRedFailsTheSweepAndIsListed(t *testing.T) {
 		!strings.Contains(errOut.String(), "kn.go:66") {
 		t.Errorf("the panic is not listed under what nothing holds:\n%s", errOut.String())
 	}
+}
+
+// ⛔ A mutate that does not know -echo rejects every mutant with exit status 2,
+// the same status as "did not compile", and a gate that ran nothing exited 0.
+func TestAnOldMutateIsRefusedBeforeAnythingRuns(t *testing.T) {
+	dir := t.TempDir()
+	old := buildOldMutate(t)
+	write(t, dir, "go.mod", "module x\n\ngo 1.27.1\n")
+	write(t, dir, "x.go", "package x\n\nfunc F(n int) int {\n\tif n < 0 {\n\t\treturn 0\n\t}\n\treturn n\n}\n")
+	var out, errOut strings.Builder
+	code := run([]string{"-dir", dir, "-mutate-bin", old, "--", "true"}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2:\n%s%s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "-echo") {
+		t.Errorf("the refusal does not name the flag: %q", errOut.String())
+	}
+	if strings.Contains(out.String(), "refusals,") {
+		t.Errorf("a sweep started: %q", out.String())
+	}
+
+	// And one that slips past the check is still a failing gate, never a pass.
+	g := oneGuardOf(t, dir)
+	got := one(config{dir: dir, timeout: time.Minute, mutate: old}, g[0], []string{"true"})
+	if got.verdict != unrun {
+		t.Fatalf("verdict %q (%s), want %q", got.verdict, got.note, unrun)
+	}
+	if code := report([]result{got}, time.Minute, &out, &errOut); code != 1 {
+		t.Fatalf("report exit %d, want 1", code)
+	}
+}
+
+// buildOldMutate compiles a stand-in that behaves as a mutate from before -echo:
+// the same flags but that one, and exit 2 on any other, as the flag package does.
+func buildOldMutate(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	const prog = `package main
+
+import (
+	"flag"
+	"os"
+)
+
+func main() {
+	fs := flag.NewFlagSet("mutate", flag.ContinueOnError)
+	fs.String("file", "", "")
+	fs.String("from", "", "")
+	fs.String("to", "", "")
+	fs.String("name", "", "")
+	fs.Bool("expect-pass", false, "")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		os.Exit(2)
+	}
+}
+`
+	write(t, dir, "main.go", prog)
+	write(t, dir, "go.mod", "module oldmutate\n\ngo 1.27.1\n")
+	bin := filepath.Join(t.TempDir(), "oldmutate"+exeSuffix())
+	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("building the stand-in: %v\n%s", err, out)
+	}
+	return bin
 }
 
 // Four guards, four ways of being held, four verdicts -- through the real mutate
@@ -206,8 +359,7 @@ func F(a, b, c int, s []int) int {
 	if strings.Join(conds, "|") != strings.Join(want, "|") {
 		t.Fatalf("got %q\nwant %q", conds, want)
 	}
-	// The default is still deletion: one refusal, the second `if` having no
-	// comparison worth moving is still a refusal to delete.
+	// The default is still deletion: the two refusals, whatever their operators.
 	del, _, err := collect(config{dir: dir})
 	if err != nil || len(del) != 2 {
 		t.Fatalf("deletion found %d refusals (%v), want 2", len(del), err)

@@ -47,8 +47,8 @@
 // # FIVE VERDICTS
 //
 // caught, SURVIVED, not a mutant, HUNG -- and caught by PANIC: the suite went
-// red, but every test that failed did so through a runtime panic and none
-// through an assertion. That is luck, not a test: the next change that enlarges
+// red, the output holds a runtime panic and no test printed an assertion line.
+// That is luck, not a test: the next change that enlarges
 // the table makes the mutant survive silently. It is counted apart from caught,
 // listed under "what nothing holds", and makes the exit status non-zero. A
 // `go test -json` command is read from its events; any other from its text, and

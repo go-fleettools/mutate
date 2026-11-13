@@ -209,8 +209,8 @@ The baseline costs one run of the command, against one per guard.
 
 | verdict | meaning |
 | --- | --- |
-| **caught** | the suite went red, and at least one test failed through an assertion: the guard is held |
-| **caught by PANIC** | the suite went red, but every test that failed did so through a runtime panic and none through an assertion: held by luck, and **listed with the survivors** |
+| **caught** | the suite went red, and some test printed an assertion line (or nothing panicked): the guard is held |
+| **caught by PANIC** | the suite went red, the output holds a runtime panic and no test printed an assertion line: held by luck, and **listed with the survivors** |
 | **SURVIVED** | the suite stayed green: nothing holds it |
 | **not a mutant** | the deletion did not compile. On real code this is often **half** of everything tried — 242 of 574 — and counting it either way is wrong |
 | **HUNG** | no answer in time. The guard is load-bearing *and* nothing says so: a timeout names no cause and costs a runner its whole budget |
@@ -247,25 +247,50 @@ what nothing holds:
   caught by PANIC  kn_fast.go:102  x < knFastMaxX  [< to <=]
 ```
 
-- **A leaf test is what counts.** A parent test fails because its subtest did, so
-  only the tests with no failing subtest are read; the verdict is a panic only when
-  *all* of those failed through one. One assertion among the panics and it is
-  `caught`, because something does say what the guard is for.
-- **Where a panic is recognised.** A line that *begins* with `panic:`, which is how
-  the Go runtime prints one (it includes `panic: test timed out` from `go test
-  -timeout`). A test that logs the word, or an assertion that quotes it, is
-  indented or prefixed by a file position, and does not count.
+The rule is one sentence: **a red suite is `caught` when any test, at any level,
+printed an assertion line; it is `caught by PANIC` when the output holds a panic
+and no test printed an assertion line anywhere.** The first version asked instead
+whether every failing *leaf* test panicked, and was wrong in both directions on
+real go1.27.4 output, which is why its fixtures are now captured from the go tool
+(`mutsweep/testdata/review`) rather than written by hand:
+
+- **An assertion line** is what `t.Error`, `t.Fatal` and `t.Log` print: an indented
+  `file_test.go:7: …`. A stack frame is a path followed by ` +0x…`, never `: `. A
+  test that asserts and *then* panics on the next line is `caught`: its assertion
+  is what holds the guard. What a test that **passed** logged (`go test -v`
+  prints it) is not an assertion.
+- **A panic** is a line holding `panic:` that is followed, within a dozen lines, by
+  the runtime's `goroutine N [` trace. The trace is the evidence. A passing test
+  that prints a line beginning `panic:`, or an assertion quoting one, has no trace;
+  and a progress mark printed without a newline, glued to the front of the real
+  report (`.panic: …`), still has one. This covers a panic in a subtest, which
+  test2json files under the *parent*; a panic in a goroutine the code started; and
+  the expiry of `go test -timeout`, neither of which names a failing test.
+- **Nothing is attributed across packages.** Tests are keyed by package, so
+  `a.TestParse`'s assertion is not hidden behind `b.TestParse/edge`'s panic.
 - **Two readings, and the report says which one answered.** When the command is
-  `go test` with `-json`, the events say which test printed each line. Otherwise
-  the plain output is read: a panic line belongs to the `--- FAIL:` line above it.
-  That is a reading of prose, so the header of every sweep names the method
-  (`a red suite is read from go test -json events`).
-- **No evidence is not luck.** A red suite that names no failing test — a
-  `TestMain` that exits 1, a vet failure — stays `caught`: the claim that a guard
-  is held only by luck needs a panic to point at.
+  `go test` with `-json`, the events say which package and test printed each line.
+  Otherwise the plain output is read, and a line belongs to the test named by the
+  last `=== RUN` or `--- FAIL:` line before it, within one package. That is a
+  reading of prose, so the header of every sweep names the method.
+- **No evidence is not luck.** A red suite with no panic in it — a `TestMain` that
+  exits 1, a vet failure — stays `caught`: the claim that a guard is held only by
+  luck needs a panic to point at.
+- **⛔ The verdict depends on which tests ran.** The first panic ends its test
+  binary, so a test that would have asserted afterwards never runs; and plain
+  output without `-v` prints a test's lines only when it finishes, so an
+  assertion by a parallel test still running when another panics is lost
+  (`-v` and `-json` stream it). The same mutant can therefore read `caught` or
+  `caught by PANIC` with `-shuffle`, `-run` or a different package order. A panic
+  red is reported as luck because the assertion it needs may simply not have been
+  reached: run the failing test alone to ask.
 
 This needs the `mutate` that comes with it: `mutsweep` asks it to print a caught
-mutant's output (`mutate -echo`), which an earlier one does not understand.
+mutant's output (`mutate -echo`). An older one rejects the flag with exit status 2,
+which is also how it says "did not compile", so every mutant would read as "not a
+mutant" and a gate that ran nothing would pass. `mutsweep` therefore asks `mutate`
+whether it knows `-echo` before the baseline and **refuses with exit 2**; a
+`mutate` that slips past the check is `NOT RUN`, which fails the gate.
 
 ### Boundaries: `-mutate boundary`
 

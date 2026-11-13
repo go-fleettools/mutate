@@ -51,6 +51,10 @@ const marginOverBaseline = 3
 
 // sweep deletes each guard in turn and reports what the suite did about it.
 func sweep(cfg config, guards []guard, cmd []string, stdout, stderr io.Writer) int {
+	if err := supportsEcho(cfg.mutate); err != nil {
+		fmt.Fprintln(stderr, "mutsweep:", err)
+		return 2
+	}
 	base, code := baseline(cfg, cmd, stderr)
 	if code != 0 {
 		return code
@@ -71,6 +75,26 @@ func sweep(cfg config, guards []guard, cmd []string, stdout, stderr io.Writer) i
 			i+1, len(guards), r.verdict, g.file, g.line, trim(g.cond, 60), r.note)
 	}
 	return report(results, cfg.timeout, stdout, stderr)
+}
+
+// supportsEcho asks the mutate command whether it understands -echo, which
+// mutsweep passes on every mutant.
+//
+// ⛔ An older mutate rejects the flag with exit status 2, which is also how it says
+// "the mutant did not compile": every mutant of a sweep read as "not a mutant",
+// which does not fail the gate, so a sweep that RAN NOTHING exited 0. Asked first,
+// so that is refused before any time is spent.
+func supportsEcho(bin string) error {
+	out, err := exec.Command(bin, "-h").CombinedOutput()
+	if err != nil && exitCode(err) < 0 {
+		return fmt.Errorf("could not run %q: %v", bin, err)
+	}
+	if !strings.Contains(string(out), "-echo") {
+		return fmt.Errorf("%q does not understand -echo, which mutsweep needs to tell a panic from an assertion "+
+			"— every mutant would be rejected and nothing would run; install the mutate that comes with this mutsweep "+
+			"(go install github.com/go-fleettools/mutate@latest)", bin)
+	}
+	return nil
 }
 
 // baseline runs the command once with nothing mutated, which is the measurement
@@ -227,6 +251,10 @@ func one(cfg config, g guard, cmd []string) result {
 		if r.verdict == caughtByPanic {
 			r.note += "  no test failed by an assertion (read from " + string(by) + ")"
 		}
+	case strings.Contains(string(out), "flag provided but not defined"):
+		// A mutate that does not know a flag mutsweep passes: nothing ran, and
+		// that is a statement about this machine, never about the code.
+		r.verdict, r.note = unrun, "mutate rejected a flag: "+trim(strings.TrimSpace(lastLine(string(out))), 70)
 	case strings.Contains(string(out), "DID NOT COMPILE"):
 		r.verdict, r.note = noBuild, firstBuildError(string(out))
 	case exitCode(err) == 1:
