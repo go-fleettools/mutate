@@ -30,6 +30,14 @@ func TestAPushThatTouchesNoGuardIsNotAskedToSweepTheFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitIn(t, work, "commit", "-am", "reword the comment")
+	// A record for these very bytes that cannot be read: the push changed no
+	// refusal, so it owes no record and an unreadable one must not refuse it.
+	// (Without the early return on "no changed guard", the gate read the
+	// record anyway and refused -- mutsweep found that guard unheld.)
+	store := os.Getenv(recordsEnv)
+	if err := os.WriteFile(filepath.Join(store, contentKey([]byte(edited))+".json"), []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if code, msg, why := hookOn(t, work, "gitpush -u origin doc"); code != 0 || msg != "" || why != "" {
 		t.Fatalf("a comment edit was asked to cover its file's old guards: exit %d, %q, %q", code, msg, why)
 	}
@@ -81,6 +89,19 @@ func TestOnlyStartsARecordThatCoversJustItsLines(t *testing.T) {
 	}
 	if code, msg, why := hookOn(t, work, "gitpush"); code != 0 || msg != "" || why != "" {
 		t.Fatalf("both changed guards swept, but the push is not allowed in silence: exit %d, %q, %q", code, msg, why)
+	}
+}
+
+// A diff that cannot be taken leaves the file NOT JUDGED (allowed, and said),
+// rather than judged on an empty set of changed lines -- which would read as
+// "this push changed no refusal" and allow in silence.
+func TestADiffThatCannotBeTakenIsNotJudgedSilently(t *testing.T) {
+	t.Setenv(recordsEnv, t.TempDir())
+	work := newPushRepo(t)
+	v := verdictOf{root: work, refused: map[string][]string{}, only: map[string][]string{}}
+	judgeFile(&v, "0000000000000000000000000000000000000bad", "g.go")
+	if len(v.unjudged) != 1 || !strings.HasPrefix(v.unjudged[0], "g.go: ") || !strings.Contains(v.unjudged[0], "git diff") {
+		t.Fatalf("a failed diff was not reported as unjudged for g.go: unjudged %q, refused %v", v.unjudged, v.refused)
 	}
 }
 
