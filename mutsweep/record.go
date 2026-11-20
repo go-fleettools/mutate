@@ -35,6 +35,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -64,13 +65,32 @@ type entry struct {
 	Cond    string  `json:"cond"`
 }
 
-// record is what one file's sweep established.
+// record is what one file's sweeps established.
+//
+// Lines names the refusals some sweep of these bytes asked about. A FULL sweep
+// leaves it empty and means every one of Guards; an -only sweep names its lines,
+// and later -only sweeps of the same bytes add theirs. The gate judges the
+// refusals a push CHANGES (#24), so a record that covers exactly those is enough:
+// asking a one-line change to sweep the other 96 guards of its file is a price
+// that gets the gate waived, and a waived gate is no gate.
 type record struct {
 	SHA256 string    `json:"sha256"`
 	File   string    `json:"file"` // where it was swept from; informational only
 	Guards int       `json:"guards"`
-	Needed []entry   `json:"needed"` // SURVIVED, HUNG, caught by PANIC
+	Lines  []int     `json:"lines,omitempty"` // empty: a full sweep of Guards refusals
+	Needed []entry   `json:"needed"`          // SURVIVED, HUNG, caught by PANIC
 	At     time.Time `json:"at"`
+}
+
+// covers reports whether some sweep of these bytes asked about the refusal on
+// line, given that the file holds total refusals now.
+func (r record) covers(line, total int) bool {
+	if len(r.Lines) == 0 {
+		// A full sweep. Fewer refusals than the walk finds now means an older
+		// mutsweep made it, and the new ones were never deleted.
+		return r.Guards >= total
+	}
+	return slices.Contains(r.Lines, line)
 }
 
 // contentKey names a file's bytes.
@@ -145,11 +165,11 @@ func storeRecord(r record) error {
 // writeRecords files what a delete-mode sweep established, one record per file.
 //
 // A FULL sweep (no -only) ran every refusal in each file it named, so it writes
-// a fresh record for each. An -only run re-asked about a few lines, so it can
-// only UPDATE a record a full sweep left for the same bytes: that is the "write
-// the tests, re-check the survivors" loop, which must be able to clear the gate
-// without re-sweeping the file. An -only run over bytes with no record says so
-// and files nothing, because a handful of lines is not a sweep of the file.
+// a fresh record for each. An -only run asked about a few lines: it replaces
+// those lines' verdicts in the record for the same bytes (the "write the tests,
+// re-check the survivors" loop), and over bytes with no record it STARTS one
+// that names exactly those lines -- which is what the gate asks of a push that
+// changed them. A partial record never passes for a full one: Lines says which.
 //
 // ⛔ A sweep in which mutate could not be started files nothing at all: its
 // verdicts are about the tool, not the code.
@@ -195,13 +215,25 @@ func writeRecords(cfg config, results []result, stderr io.Writer) error {
 			return err
 		}
 		if !ok {
-			fmt.Fprintf(stderr, "mutsweep: no full-sweep record for %s at this content, so -only "+
-				"updated nothing — a few lines are not a sweep of the file\n", p)
-			continue
+			fmt.Fprintf(stderr, "mutsweep: %s had no record at this content; filed one for the %d "+
+				"line(s) asked about, which is not a sweep of the file\n", p, len(rs))
+			rec = record{SHA256: key, File: p}
 		}
 		rerun := map[int]result{}
 		for _, r := range rs {
 			rerun[r.line] = r
+		}
+		if !ok || len(rec.Lines) > 0 {
+			// A partial record learns which lines it now covers; a full one
+			// already covers them all.
+			// Membership, not covers(): a record just started has no Lines
+			// yet, and covers() would read that as a full sweep.
+			for _, r := range rs {
+				if !slices.Contains(rec.Lines, r.line) {
+					rec.Lines = append(rec.Lines, r.line)
+				}
+			}
+			slices.Sort(rec.Lines)
 		}
 		var kept []entry
 		for _, e := range rec.Needed {

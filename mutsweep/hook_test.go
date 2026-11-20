@@ -219,7 +219,9 @@ func TestTheGateRefusesUntilASweepCoversTheBytesPushed(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("an unswept change was allowed (exit %d)", code)
 	}
-	for _, want := range []string{"g.go", "never swept as committed (2 refusals)", "mutsweep -dir . -run-in . -files g.go"} {
+	// Only line 10 is the push's own: line 7's guard is main's (#24), and the
+	// remedy asks about line 10 alone.
+	for _, want := range []string{"g.go", "1 changed refusal(s) never swept as committed: g.go:10", "mutsweep -dir . -run-in . -only g.go:10"} {
 		if !strings.Contains(why, want) {
 			t.Errorf("the refusal does not say %q:\n%s", want, why)
 		}
