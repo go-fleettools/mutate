@@ -89,6 +89,37 @@ type hookPayload struct {
 type push struct {
 	dir  string
 	skip bool
+	// moved names a git command earlier in the same line that moves HEAD
+	// (`git commit`, …). The hook runs BEFORE the line, so it would judge the
+	// HEAD from before that commit: an empty diff, allowed in silence. #26.
+	moved string
+}
+
+// headMovers are the git subcommands after which HEAD is not what the hook read.
+var headMovers = map[string]bool{
+	"commit": true, "merge": true, "cherry-pick": true, "rebase": true, "am": true,
+	"revert": true, "reset": true, "checkout": true, "switch": true, "pull": true,
+}
+
+// headMover returns the subcommand when the words are a git invocation that
+// moves HEAD, skipping git's own leading options (-C dir, -c key=value, --flags).
+func headMover(f []string) string {
+	if len(f) == 0 || filepath.Base(f[0]) != "git" {
+		return ""
+	}
+	for i := 1; i < len(f); i++ {
+		switch {
+		case f[i] == "-C" || f[i] == "-c":
+			i++ // the option's value
+		case strings.HasPrefix(f[i], "-"):
+		default:
+			if headMovers[f[i]] {
+				return f[i]
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 // pushesIn finds the gitpush invocations in a Bash command line.
@@ -103,6 +134,7 @@ type push struct {
 // direction this hook fails in whenever it cannot read.
 func pushesIn(command, cwd string) []push {
 	dir := cwd
+	moved := ""
 	var out []push
 	for _, seg := range splitSegments(command) {
 		f := strings.Fields(seg)
@@ -120,7 +152,11 @@ func pushesIn(command, cwd string) []push {
 		case f[0] == "cd" && len(f) > 1:
 			dir = resolveDir(dir, f[1])
 		case filepath.Base(f[0]) == "gitpush":
-			out = append(out, push{dir: dir, skip: skip})
+			out = append(out, push{dir: dir, skip: skip, moved: moved})
+		default:
+			if m := headMover(f); m != "" && moved == "" {
+				moved = "git " + m
+			}
 		}
 	}
 	return out
@@ -431,6 +467,21 @@ func hookMain(in io.Reader, stdout, stderr io.Writer) int {
 	}
 	var refusal, waived, said []string
 	for _, ps := range pushes {
+		if ps.moved != "" {
+			// Refused, not allowed: this is not a surface the hook cannot read but
+			// one it would read WRONG — the HEAD it sees is not the one pushed —
+			// and the remedy is free and certain.
+			if ps.skip {
+				waived = append(waived, "(a push after `"+ps.moved+"` in the same command, not judged)")
+				continue
+			}
+			refusal = append(refusal, "in "+ps.dir+":",
+				"  this command runs `"+ps.moved+"` before it pushes, and the gate runs BEFORE the command:",
+				"  it would judge HEAD as it is now, not the commit being pushed (#26).",
+				"", "Run the push as a command of its own, after the commit:",
+				"  gitpush …")
+			continue
+		}
 		v, err := judge(ps.dir)
 		if err != nil {
 			said = append(said, "NOT JUDGED in "+ps.dir+": "+err.Error())
@@ -467,7 +518,7 @@ func hookMain(in io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	if len(refusal) > 0 {
-		fmt.Fprintln(stderr, "⛔ mutsweep gate: this push sends Go source whose refusals no sweep has covered.")
+		fmt.Fprintln(stderr, "⛔ mutsweep gate: this push is refused — what it sends has not been judged covered.")
 		fmt.Fprintln(stderr)
 		for _, l := range refusal {
 			fmt.Fprintln(stderr, l)

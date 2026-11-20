@@ -47,6 +47,18 @@ func TestPushesInFindsEveryGitpushAndWhereItRuns(t *testing.T) {
 		// Only =1 is the waiver: a variable that is merely PRESENT is not a decision.
 		{"MUTSWEEP_SKIP=0 gitpush", "/a", []push{{dir: "/a"}}},
 		{"GITSAFE_ALLOW_STALE_BASE=1 gitpush", "/a", []push{{dir: "/a"}}},
+		// #26: HEAD moved earlier in the same line. The first is the line that
+		// went through unjudged on go-tex/engine par-token-runaway.
+		{"git add e.go && git commit -q -F m.txt && ~/.local/bin/gitpush -u origin x", "/a", []push{{dir: "/a", moved: "git commit"}}},
+		{"git -C /r -c core.x=y cherry-pick abc; gitpush", "/a", []push{{dir: "/a", moved: "git cherry-pick"}}},
+		{"cd /b && git switch -c y && MUTSWEEP_SKIP=1 gitpush", "/a", []push{{dir: p("/b"), skip: true, moved: "git switch"}}},
+		// After the push, or not moving HEAD, it is not counted.
+		{"gitpush && git commit -m z", "/a", []push{{dir: "/a"}}},
+		{"git status && git log -1 && git fetch && gitpush", "/a", []push{{dir: "/a"}}},
+		{"git -C commit status && gitpush", "/a", []push{{dir: "/a"}}},
+		// Only GIT moves HEAD: another command whose second word is a git verb
+		// is not one (mutsweep found this unheld: hook.go's "is it git" test).
+		{"echo commit && gitpush", "/a", []push{{dir: "/a"}}},
 		// Not pushes: the word appears, but not as the command.
 		{"echo gitpush", "/a", nil},
 		{"git push origin x", "/a", nil},
@@ -63,6 +75,22 @@ func TestPushesInFindsEveryGitpushAndWhereItRuns(t *testing.T) {
 				t.Errorf("%q: push %d = %+v, want %+v", tc.cmd, i, got[i], tc.want[i])
 			}
 		}
+	}
+}
+
+// #26 end to end: a commit and a push on one line is refused with the reason,
+// even though HEAD (not yet committed) has nothing for the gate to judge; the
+// waiver still waives it, said.
+func TestACommitThenPushOnOneLineIsRefusedWithTheReason(t *testing.T) {
+	t.Setenv(recordsEnv, t.TempDir())
+	work := newPushRepo(t)
+	code, _, why := hookOn(t, work, "git commit -qam x && gitpush")
+	if code != 2 || !strings.Contains(why, "runs `git commit` before it pushes") || !strings.Contains(why, "Run the push as a command of its own") {
+		t.Fatalf("commit-then-push was not refused with its reason (exit %d):\n%s", code, why)
+	}
+	code, msg, _ := hookOn(t, work, "git commit -qam x && MUTSWEEP_SKIP=1 gitpush")
+	if code != 0 || !strings.Contains(msg, "WAIVED") || !strings.Contains(msg, "git commit") {
+		t.Fatalf("the waiver did not waive it, said (exit %d): %q", code, msg)
 	}
 }
 
