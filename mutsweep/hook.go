@@ -70,6 +70,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -182,13 +183,14 @@ func gitOut(dir string, args ...string) ([]byte, error) {
 type verdictOf struct {
 	root     string
 	refused  map[string][]string // repo-relative file -> why
+	only     map[string][]string // repo-relative file -> the -only targets that clear it
 	panics   []string            // allowed, said
 	unjudged []string            // could not read: allowed, said
 }
 
 // judge reads what a push from dir would send and decides each file.
 func judge(dir string) (verdictOf, error) {
-	v := verdictOf{refused: map[string][]string{}}
+	v := verdictOf{refused: map[string][]string{}, only: map[string][]string{}}
 	top, err := gitOut(dir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return v, err
@@ -212,9 +214,58 @@ func judge(dir string) (verdictOf, error) {
 		if f == "" || strings.HasSuffix(f, "_test.go") || underSkippedDir(f) {
 			continue
 		}
-		judgeFile(&v, f)
+		judgeFile(&v, base, f)
 	}
 	return v, nil
+}
+
+// changedLines is the set of HEAD-side lines of f that the push adds or
+// rewrites against base: the new side of each hunk of a zero-context diff.
+//
+// ⚠ A guard is judged where its condition STARTS (guard.line). A change inside
+// the body of an if, leaving its condition alone, does not make that guard
+// "changed": what the record vouches for is the refusal, and its deletion is
+// the condition, so the condition's line is the one that has to be in the diff.
+func changedLines(root, base, f string) (map[int]bool, error) {
+	out, err := gitOut(root, "diff", "-U0", "--no-color", "--no-ext-diff", base, "HEAD", "--", f)
+	if err != nil {
+		return nil, err
+	}
+	lines := map[int]bool{}
+	for _, l := range strings.Split(string(out), "\n") {
+		if !strings.HasPrefix(l, "@@ ") {
+			continue
+		}
+		start, count, err := newSide(l)
+		if err != nil {
+			return nil, err
+		}
+		for i := start; i < start+count; i++ {
+			lines[i] = true
+		}
+	}
+	return lines, nil
+}
+
+// newSide reads "+c,d" (or "+c", meaning one line) from a hunk header
+// "@@ -a,b +c,d @@ …". d is 0 for a pure deletion, which changes no HEAD line.
+func newSide(header string) (start, count int, err error) {
+	fields := strings.Fields(header)
+	if len(fields) < 3 || !strings.HasPrefix(fields[2], "+") {
+		return 0, 0, fmt.Errorf("not a hunk header: %q", header)
+	}
+	spec := strings.TrimPrefix(fields[2], "+")
+	count = 1
+	if c, n, ok := strings.Cut(spec, ","); ok {
+		spec = c
+		if count, err = strconv.Atoi(n); err != nil {
+			return 0, 0, fmt.Errorf("hunk header %q: %v", header, err)
+		}
+	}
+	if start, err = strconv.Atoi(spec); err != nil {
+		return 0, 0, fmt.Errorf("hunk header %q: %v", header, err)
+	}
+	return start, count, nil
 }
 
 // underSkippedDir reports a path under testdata/ or vendor/, which the go tool
@@ -228,7 +279,11 @@ func underSkippedDir(f string) bool {
 	return false
 }
 
-func judgeFile(v *verdictOf, f string) {
+// judgeFile decides one pushed file, on the refusals the push CHANGED (#24): a
+// guard whose condition line is in the diff against base. The others were there
+// before this push and are not its to answer for -- they are judged when their
+// own lines change, and a full sweep remains the way to audit them all.
+func judgeFile(v *verdictOf, base, f string) {
 	src, err := gitOut(v.root, "show", "HEAD:"+f)
 	if err != nil {
 		v.unjudged = append(v.unjudged, f+": "+err.Error())
@@ -248,26 +303,43 @@ func judgeFile(v *verdictOf, f string) {
 		v.unjudged = append(v.unjudged, f+": "+err.Error())
 		return
 	}
-	if len(gs) == 0 {
-		return // nothing to delete, nothing to cover
+	changed, err := changedLines(v.root, base, f)
+	if err != nil {
+		v.unjudged = append(v.unjudged, f+": "+err.Error())
+		return
+	}
+	var mine []guard
+	for _, g := range gs {
+		if changed[g.line] {
+			mine = append(mine, g)
+		}
+	}
+	if len(mine) == 0 {
+		return // the push changed no refusal here: nothing of its own to cover
 	}
 	rec, ok, err := lookupRecord(contentKey(src))
-	switch {
-	case err != nil:
+	if err != nil {
 		// Refused, not allowed: a record that cannot be read is one a re-sweep
 		// replaces, and allowing on it would let a corrupt file vouch.
 		v.refused[f] = append(v.refused[f], "its record cannot be read: "+err.Error())
 		return
-	case !ok:
-		v.refused[f] = append(v.refused[f], fmt.Sprintf("never swept as committed (%d refusals)", len(gs)))
-		return
-	case rec.Guards < len(gs):
-		// The walk found more refusals than the sweep did: the record was made
-		// by an older mutsweep, and the new ones were never deleted.
-		v.refused[f] = append(v.refused[f], fmt.Sprintf("swept %d of its %d refusals (an older walk)", rec.Guards, len(gs)))
+	}
+	var unswept []string
+	for _, g := range mine {
+		if !ok || !rec.covers(g.line, len(gs)) {
+			unswept = append(unswept, fmt.Sprintf("%s:%d", name, g.line))
+		}
+	}
+	if len(unswept) > 0 {
+		v.refused[f] = append(v.refused[f], fmt.Sprintf("%d changed refusal(s) never swept as committed: %s",
+			len(unswept), strings.Join(unswept, ",")))
+		v.only[f] = unswept
 		return
 	}
 	for _, e := range rec.Needed {
+		if !changed[e.Line] {
+			continue // a verdict on a refusal this push did not touch
+		}
 		switch e.Verdict {
 		case survived, hung:
 			v.refused[f] = append(v.refused[f], fmt.Sprintf("%s %s:%d  %s", e.Verdict, name, e.Line, e.Cond))
@@ -312,6 +384,23 @@ func remedy(v verdictOf) []string {
 		}
 		names := byDir[d]
 		sort.Strings(names)
+		// Where every refused file names its unswept lines, ask about those
+		// lines alone: that is the whole of what the push owes (#24). Any other
+		// refusal here (a record that cannot be read) needs the full sweep.
+		var targets []string
+		for _, n := range names {
+			t := v.only[filepath.Join(d, n)]
+			if len(t) == 0 {
+				targets = nil
+				break
+			}
+			targets = append(targets, t...)
+		}
+		if len(targets) > 0 {
+			out = append(out, fmt.Sprintf("cd %s && mutsweep -dir %s -run-in . -only %s -- go test ./...",
+				mod, rel, strings.Join(targets, ",")))
+			continue
+		}
 		out = append(out, fmt.Sprintf("cd %s && mutsweep -dir %s -run-in . -files %s -- go test ./...",
 			mod, rel, strings.Join(names, ",")))
 	}
