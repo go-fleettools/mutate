@@ -74,7 +74,22 @@ func sweep(cfg config, guards []guard, cmd []string, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "[%d/%d] %-12s %s:%d  %s  %s\n",
 			i+1, len(guards), r.verdict, g.file, g.line, trim(g.cond, 60), r.note)
 	}
-	return report(results, cfg.timeout, stdout, stderr)
+	code = report(results, cfg.timeout, stdout, stderr)
+	// Only a DELETE-mode sweep is filed: the push gate asks whether each refusal
+	// was deleted with the suite watching, and a boundary sweep answers a
+	// different question about the same lines.
+	if !cfg.boundary() {
+		if err := writeRecords(cfg, results, stderr); err != nil {
+			// Said, and made to fail: a sweep whose record is missing is one
+			// the gate will refuse, and a clean exit here would send the reader
+			// looking for the fault in the gate.
+			fmt.Fprintln(stderr, "mutsweep: the sweep ran but its record was NOT filed:", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	return code
 }
 
 // supportsEcho asks the mutate command whether it understands -echo, which

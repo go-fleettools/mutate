@@ -137,6 +137,13 @@ import (
 const active = "MUTSWEEP_ACTIVE"
 
 func main() {
+	// The push gate first (hook.go). It runs no command and starts no sweep, so
+	// the recursion guard below has nothing to protect there -- and a stray
+	// MUTSWEEP_ACTIVE in a session's environment must not refuse every push with
+	// a message about sweeps inside sweeps.
+	if len(os.Args) == 2 && os.Args[1] == "-hook" {
+		os.Exit(hookMain(os.Stdin, os.Stdout, os.Stderr))
+	}
 	if os.Getenv(active) != "" {
 		fmt.Fprintln(os.Stderr, "mutsweep: refusing to run inside another sweep — "+
 			"the command a sweep runs must not reach this tool, or each mutant starts a sweep of its own")

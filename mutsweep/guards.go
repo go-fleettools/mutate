@@ -256,79 +256,98 @@ func collect(cfg config) ([]guard, []string, error) {
 	for _, p := range paths {
 		// Relative to -dir, because the command and mutate both run THERE:
 		// a path that is right for this process is wrong for them.
-		full := filepath.Join(cfg.dir, p)
-		src, err := os.ReadFile(full)
+		src, err := os.ReadFile(filepath.Join(cfg.dir, p))
 		if err != nil {
 			return nil, nil, err
 		}
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, full, src, parser.ParseComments)
+		found, err := guardsIn(cfg.dir, p, src, cfg.boundary())
 		if err != nil {
 			return nil, nil, err
 		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			// A statement list is not always a BlockStmt: a case in a switch
-			// and a comm clause in a select hold bare []ast.Stmt, and a walk
-			// that forgets them is blind where it claims to look.
-			var list []ast.Stmt
-			switch v := n.(type) {
-			case *ast.BlockStmt:
-				list = v.List
-			case *ast.CaseClause:
-				list = v.Body
-			case *ast.CommClause:
-				list = v.Body
-			case *ast.ForStmt:
-				// A loop's own condition is an edge too: the walk that stops one
-				// element early or late is the off-by-one a table bound hides.
-				if cfg.boundary() && v.Cond != nil {
-					out = append(out, boundaries(cfg.dir, p, fset, string(src), v.Cond)...)
-				}
-				return true
-			default:
-				return true
-			}
-			for _, stmt := range list {
-				ifs, ok := stmt.(*ast.IfStmt)
-				if !ok || ifs.Init != nil || ifs.Else != nil || len(ifs.Body.List) == 0 || len(ifs.Body.List) > 3 {
-					continue
-				}
-				if _, isReturn := ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt); !isReturn {
-					continue
-				}
-				if cfg.boundary() {
-					out = append(out, boundaries(cfg.dir, p, fset, string(src), ifs.Cond)...)
-					continue
-				}
-				start := fset.Position(ifs.Pos())
-				end := fset.Position(ifs.End())
-				text := string(src[start.Offset:end.Offset])
-				// Take the newline with it, so deleting the guard does not
-				// leave a blank line where it stood and gofmt has nothing to
-				// say about the mutant.
-				if end.Offset < len(src) && src[end.Offset] == '\n' {
-					text += "\n"
-				}
-				from, to := unique(string(src), start.Offset, start.Offset+len(text))
-				var cond strings.Builder
-				printer.Fprint(&cond, fset, ifs.Cond)
-				out = append(out, guard{
-					dir:  cfg.dir,
-					file: p,
-					line: start.Line,
-					cond: strings.Join(strings.Fields(cond.String()), " "),
-					from: from,
-					to:   to,
-				})
-			}
-			return true
-		})
+		out = append(out, found...)
 	}
 	if len(cfg.only) > 0 {
 		g, kErr := keepOnly(out, cfg.only)
 		return g, excluded, kErr
 	}
 	return out, excluded, nil
+}
+
+// guardsIn finds the refusals in one file's SOURCE, given as bytes rather than
+// read from disk.
+//
+// ⛔ It takes the bytes because the push gate (hook.go) must judge what a push
+// SENDS, which is the committed blob at HEAD, and that is not always the file on
+// disk. Reading the working tree there would let an uncommitted edit decide
+// whether a commit is covered. There is ONE walk, and the sweep and the gate both
+// call it: a second copy written for the gate would be a second definition of
+// "a refusal", free to disagree with the one that was actually swept.
+func guardsIn(dir, p string, src []byte, boundary bool) ([]guard, error) {
+	full := filepath.Join(dir, p)
+	var out []guard
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, full, src, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		// A statement list is not always a BlockStmt: a case in a switch
+		// and a comm clause in a select hold bare []ast.Stmt, and a walk
+		// that forgets them is blind where it claims to look.
+		var list []ast.Stmt
+		switch v := n.(type) {
+		case *ast.BlockStmt:
+			list = v.List
+		case *ast.CaseClause:
+			list = v.Body
+		case *ast.CommClause:
+			list = v.Body
+		case *ast.ForStmt:
+			// A loop's own condition is an edge too: the walk that stops one
+			// element early or late is the off-by-one a table bound hides.
+			if boundary && v.Cond != nil {
+				out = append(out, boundaries(dir, p, fset, string(src), v.Cond)...)
+			}
+			return true
+		default:
+			return true
+		}
+		for _, stmt := range list {
+			ifs, ok := stmt.(*ast.IfStmt)
+			if !ok || ifs.Init != nil || ifs.Else != nil || len(ifs.Body.List) == 0 || len(ifs.Body.List) > 3 {
+				continue
+			}
+			if _, isReturn := ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt); !isReturn {
+				continue
+			}
+			if boundary {
+				out = append(out, boundaries(dir, p, fset, string(src), ifs.Cond)...)
+				continue
+			}
+			start := fset.Position(ifs.Pos())
+			end := fset.Position(ifs.End())
+			text := string(src[start.Offset:end.Offset])
+			// Take the newline with it, so deleting the guard does not
+			// leave a blank line where it stood and gofmt has nothing to
+			// say about the mutant.
+			if end.Offset < len(src) && src[end.Offset] == '\n' {
+				text += "\n"
+			}
+			from, to := unique(string(src), start.Offset, start.Offset+len(text))
+			var cond strings.Builder
+			printer.Fprint(&cond, fset, ifs.Cond)
+			out = append(out, guard{
+				dir:  dir,
+				file: p,
+				line: start.Line,
+				cond: strings.Join(strings.Fields(cond.String()), " "),
+				from: from,
+				to:   to,
+			})
+		}
+		return true
+	})
+	return out, nil
 }
 
 // keepOnly narrows a collection to the named refusals, and refuses a name that

@@ -403,6 +403,62 @@ short-circuit that only saves work. Read each one — and read the **end** of
 the function, since most of them are held by something further in. The
 summary says so where somebody will see it.
 
+### A sweep leaves a record, and `-hook` refuses a push no sweep covered
+
+A sweep used to leave nothing but its report, which made this an **analysis
+tool, not a gate**: nothing failed when it was not run. That was measured, not
+argued. Over 2026-11-18/19 two sessions wrote "break-checked" over hand-made
+mutations while `mutsweep` sat installed, and when it was finally run it found
+three refusals no test held — all in code **already merged**.
+
+So a delete-mode sweep now files a **record** per file it swept completely,
+keyed by the SHA-256 of the file's bytes, under the user config directory
+(`MUTSWEEP_RECORDS` overrides it). And:
+
+    mutsweep -hook        # a Claude Code PreToolUse hook on Bash
+
+reads the hook payload and, when the command pushes with `gitpush`, refuses the
+push if it sends a non-test Go file holding refusals that:
+
+| | |
+|---|---|
+| have **no record at the bytes committed at HEAD** | refused: never swept as it is now |
+| have a record with **SURVIVED** or **HUNG** | refused, naming the line |
+| were swept by an older walk that found **fewer** refusals | refused |
+| have only **caught by PANIC** | allowed, and said |
+
+Editing a file changes its key, so a record cannot vouch for bytes it never
+saw — a comment included. The loop the report recommends clears it: write the
+test a survivor asks for, re-ask just that line with `-only file.go:line`, and
+the `-only` run **updates** the record for those bytes without re-sweeping the
+file.
+
+⚠ **caught by PANIC is not refused**, deliberately. For an *indexing* guard —
+one whose deletion makes the next line index out of range — a panic is the only
+red any test can produce, so refusing it would make the gate impassable for
+correct code. A gate that must always be waived teaches waiving.
+
+⚠ **What it does not see**, said rather than implied:
+
+* it judges **HEAD**, so `gitpush origin other-branch` from another checkout is
+  judged by the wrong commit;
+* it does not see `ghmerge`, which merges by number with no tree here to hash —
+  a branch merged that way was pushed, and the push is where it was judged;
+* a record is keyed by the guarded file only, so **deleting the test** that held
+  a guard does not invalidate the record — keying on every `_test.go` would
+  invalidate every record on every test edit, and a gate re-sweeping for a typo
+  in an unrelated test gets waived by habit;
+* it reads the command's text, not a shell: a push inside a quoted string or an
+  `eval` is not seen.
+
+**When it cannot read** — a payload it cannot parse, a repository with no
+`origin/HEAD`, `origin/main` or `origin/master` — it **allows, and says so** to
+the user through the hook's `systemMessage`. An allowance that is not announced
+would be the gate-that-does-nothing again.
+
+**The waiver** is `MUTSWEEP_SKIP=1 gitpush …`, and it is printed to the user with
+the files that went out unswept. A waiver is made in public or not at all.
+
 ## Why it is a program and not a one-liner
 
 A green test says nothing on its own. It says something once you have seen
