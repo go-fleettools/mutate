@@ -228,8 +228,11 @@ func TestASweepWhoseRecordCannotBeFiledFails(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("AppData", "")
-	// "is not defined" is how os.UserConfigDir says it on both ($HOME, %AppData%).
-	if c, why := sweepWith(""); c != 1 || !strings.Contains(why, "NOT filed") || !strings.Contains(why, "is not defined") {
+	// os.UserConfigDir words it per OS: "$HOME is not defined" (darwin),
+	// "%AppData% is not defined" (windows), "neither $XDG_CONFIG_HOME nor $HOME
+	// are defined" (linux, where CI caught "is not defined" as darwin-only).
+	// " defined" is the part all three share.
+	if c, why := sweepWith(""); c != 1 || !strings.Contains(why, "NOT filed") || !strings.Contains(why, " defined") {
 		t.Errorf("a store that cannot be located: exit %d, want 1 saying NOT filed for want of a config dir:\n%s", c, why)
 	}
 
