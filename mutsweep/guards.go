@@ -75,6 +75,10 @@ type guard struct {
 	// answer was already known is what surfaced it; it had silently dropped two
 	// real survivors.
 	from, to string
+	// altFrom and altTo are the fallback mutation, used when deleting the `if`
+	// does not compile (a variable used only in its condition is left unused):
+	// the condition replaced by `false && (C)`. Empty when from/to already is it.
+	altFrom, altTo string
 }
 
 func parse(argv []string, stderr io.Writer) (config, []string, int) {
@@ -314,7 +318,10 @@ func guardsIn(dir, p string, src []byte, boundary bool) ([]guard, error) {
 		}
 		for _, stmt := range list {
 			ifs, ok := stmt.(*ast.IfStmt)
-			if !ok || ifs.Init != nil || ifs.Else != nil || len(ifs.Body.List) == 0 || len(ifs.Body.List) > 3 {
+			// An `if` with an Init clause is a refusal like any other. It was
+			// skipped here once, and a skipped guard is the worst kind: not
+			// swept, not counted, not reported, so the sweep read as clean.
+			if !ok || ifs.Else != nil || len(ifs.Body.List) == 0 || len(ifs.Body.List) > 3 {
 				continue
 			}
 			if _, isReturn := ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt); !isReturn {
@@ -336,14 +343,29 @@ func guardsIn(dir, p string, src []byte, boundary bool) ([]guard, error) {
 			from, to := unique(string(src), start.Offset, start.Offset+len(text))
 			var cond strings.Builder
 			printer.Fprint(&cond, fset, ifs.Cond)
-			out = append(out, guard{
+			g := guard{
 				dir:  dir,
 				file: p,
 				line: start.Line,
 				cond: strings.Join(strings.Fields(cond.String()), " "),
 				from: from,
 				to:   to,
-			})
+			}
+			// The second mutation: the condition becomes `false && (C)`. The Init
+			// statement and every use of its variables stay, so it compiles where
+			// deleting the whole `if` leaves them unused; the body is unreachable.
+			cs, ce := fset.Position(ifs.Cond.Pos()).Offset, fset.Position(ifs.Cond.End()).Offset
+			altFrom, _ := unique(string(src), cs, ce)
+			altTo := altFrom[:len(altFrom)-(ce-cs)] + "false && (" + string(src[cs:ce]) + ")"
+			if ifs.Init != nil {
+				// Deleting an if that has an Init clause also deletes a statement
+				// that may have effects, so it is not "the guard removed". Only
+				// the false && (C) mutation is faithful.
+				g.from, g.to = altFrom, altTo
+			} else {
+				g.altFrom, g.altTo = altFrom, altTo
+			}
+			out = append(out, g)
 		}
 		return true
 	})

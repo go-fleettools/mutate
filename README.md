@@ -212,7 +212,7 @@ The baseline costs one run of the command, against one per guard.
 | **caught** | the suite went red, and some test printed an assertion line (or nothing panicked): the guard is held |
 | **caught by PANIC** | the suite went red, the output holds a runtime panic and no test printed an assertion line: held by luck, and **listed with the survivors** |
 | **SURVIVED** | the suite stayed green: nothing holds it |
-| **not a mutant** | the deletion did not compile. On real code this is often **half** of everything tried — 242 of 574 — and counting it either way is wrong |
+| **not a mutant** | neither mutation compiled (the deletion, then `false && (C)`, see below). Before the fallback this was often **half** of everything tried — 242 of 574 — and counting it either way is wrong |
 | **HUNG** | no answer in time. The guard is load-bearing *and* nothing says so: a timeout names no cause and costs a runner its whole budget |
 
 `caught`, `caught by PANIC`, `SURVIVED` and `HUNG` are the ones that decide the
@@ -321,6 +321,24 @@ whether it knows `-echo` before the baseline and **refuses with exit 2**; a
 mutate's *own* refusal counts (exit 2, and its output *begins* with the flag
 error): a CLI under test whose flag tests print the same phrase does not turn a
 survivor into `NOT RUN`.
+
+### Init-clause refusals, and a deletion that does not compile
+
+`if v, err := f(); err != nil { return … }` is a refusal like any other, and
+`mutsweep` lists it. It used to be skipped: not swept, not counted, not
+reported, so a sweep read as clean beside a guard whose test passed with the
+guard neutralised. Deleting such an `if` would also delete the statement in its
+Init clause, so it is mutated differently: the condition `C` becomes
+`false && (C)`. The Init statement and every use of its variables stay, and the
+body is unreachable.
+
+The same mutation is the **fallback** for an ordinary refusal whose deletion
+does not compile (a variable used only in the condition is left unused: 8 of 11
+refusals in one file read "not a mutant" that way, which means a guard nothing
+tests). `mutsweep` retries it as `false && (C)` and reports the verdict of that
+run, with a note saying so. "not a mutant" is now only for a guard where neither
+mutation compiles. `-mutate boundary` visits the conditions of init-clause
+`if`s too.
 
 ### Boundaries: `-mutate boundary`
 
