@@ -30,16 +30,20 @@ func TestMain(m *testing.M) {
 
 func TestPushesInFindsEveryGitpushAndWhereItRuns(t *testing.T) {
 	home, _ := os.UserHomeDir()
+	// The platform's spelling of a path the SHELL calls /x: on Windows `/b`
+	// becomes `\b`. Expectations written as "/b" were right on two of three CI
+	// lanes and wrong on the third.
+	p := func(s string) string { return filepath.Clean(filepath.FromSlash(s)) }
 	for _, tc := range []struct {
 		cmd, cwd string
 		want     []push
 	}{
 		{"gitpush -u origin x", "/a", []push{{dir: "/a"}}},
-		{"cd /b && gitpush origin x", "/a", []push{{dir: "/b"}}},
-		{"cd sub && gitpush", "/a", []push{{dir: "/a/sub"}}},
-		{"ls; cd /c; gitpush", "/a", []push{{dir: "/c"}}},
+		{"cd /b && gitpush origin x", "/a", []push{{dir: p("/b")}}},
+		{"cd sub && gitpush", "/a", []push{{dir: p("/a/sub")}}},
+		{"ls; cd /c; gitpush", "/a", []push{{dir: p("/c")}}},
 		{"cd ~/clone && ~/.local/bin/gitpush -u origin x", "/a", []push{{dir: filepath.Join(home, "clone")}}},
-		{"cd /b && MUTSWEEP_SKIP=1 gitpush", "/a", []push{{dir: "/b", skip: true}}},
+		{"cd /b && MUTSWEEP_SKIP=1 gitpush", "/a", []push{{dir: p("/b"), skip: true}}},
 		// Only =1 is the waiver: a variable that is merely PRESENT is not a decision.
 		{"MUTSWEEP_SKIP=0 gitpush", "/a", []push{{dir: "/a"}}},
 		{"GITSAFE_ALLOW_STALE_BASE=1 gitpush", "/a", []push{{dir: "/a"}}},

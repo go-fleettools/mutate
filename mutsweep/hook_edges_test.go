@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -94,8 +95,11 @@ func TestAnUnreadableRecordRefusesRatherThanVouches(t *testing.T) {
 	// ⚠ The reason too: without record.go:99 the empty read is parsed as JSON
 	// and refused as "unexpected end of JSON input" -- the same refusal, the
 	// wrong cause. That version of this test let the guard survive a sweep.
+	// Asserted as what the reason must NOT be: the OS's own words for reading a
+	// directory differ ("is a directory" here, something else on Windows, where
+	// the first version of this assertion failed).
 	if code, _, why := hookOn(t, work, "gitpush"); code != 2 || !strings.Contains(why, "cannot be read") ||
-		!strings.Contains(why, "is a directory") {
+		strings.Contains(why, "JSON") {
 		t.Errorf("an unreadable record did not refuse for its own reason (exit %d):\n%s", code, why)
 	}
 
@@ -167,12 +171,11 @@ func TestTheRemedyTerminatesWithoutAGoMod(t *testing.T) {
 	work := newPushRepo(t)
 	gitIn(t, work, "rm", "-q", "go.mod")
 	gitIn(t, work, "commit", "-m", "no module file")
-	// git reports the RESOLVED path, and a temporary directory is often reached
-	// through a link (/var -> /private/var on macOS): compare the same spelling.
-	root, err := filepath.EvalSymlinks(work)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Compare against git's OWN spelling of the root, which is what the gate
+	// uses: it resolves links (/var -> /private/var on macOS) and writes C:/
+	// with forward slashes on Windows. EvalSymlinks agreed on one OS and not the
+	// other.
+	root := strings.TrimSpace(gitIn(t, work, "rev-parse", "--show-toplevel"))
 	code, _, why := hookOn(t, work, "gitpush")
 	if code != 2 || !strings.Contains(why, "cd "+root+" && mutsweep -dir . ") {
 		t.Errorf("the remedy did not fall back to the repository root (exit %d):\n%s", code, why)
@@ -219,13 +222,25 @@ func TestASweepWhoseRecordCannotBeFiledFails(t *testing.T) {
 		}
 		t.Setenv(v, strings.TrimSpace(string(out)))
 	}
+	// Every variable os.UserConfigDir reads, on every OS this runs on: Windows
+	// reads %AppData% and not HOME, and CI there swept a store it should not
+	// have been able to locate.
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
-	if c, why := sweepWith(""); c != 1 || !strings.Contains(why, "NOT filed") || !strings.Contains(why, "HOME") {
-		t.Errorf("a store that cannot be located: exit %d, want 1 saying NOT filed for want of HOME:\n%s", c, why)
+	t.Setenv("AppData", "")
+	// "is not defined" is how os.UserConfigDir says it on both ($HOME, %AppData%).
+	if c, why := sweepWith(""); c != 1 || !strings.Contains(why, "NOT filed") || !strings.Contains(why, "is not defined") {
+		t.Errorf("a store that cannot be located: exit %d, want 1 saying NOT filed for want of a config dir:\n%s", c, why)
 	}
 
 	// :130 -- the store exists and cannot be written into.
+	// ⚠ Not on Windows: there a directory's read-only attribute does not stop
+	// files being created in it, so chmod 0500 makes nothing unwritable and the
+	// case cannot be built. Skipping it is said, not silent.
+	if runtime.GOOS == "windows" {
+		t.Log("read-only store case skipped: Windows does not honour a read-only directory")
+		return
+	}
 	readOnly := t.TempDir()
 	if err := os.Chmod(readOnly, 0o500); err != nil {
 		t.Fatal(err)

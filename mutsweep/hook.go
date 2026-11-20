@@ -155,7 +155,11 @@ func resolveDir(dir, arg string) string {
 			arg = filepath.Join(home, strings.TrimPrefix(arg, "~"))
 		}
 	}
-	if !filepath.IsAbs(arg) {
+	// A leading slash is absolute in the SHELL this command was written for,
+	// whatever filepath thinks: on Windows `/b` has no drive and IsAbs says
+	// no, so `cd /b` was read as a subdirectory of where the shell already was.
+	// Windows CI found it.
+	if !filepath.IsAbs(arg) && !strings.HasPrefix(arg, "/") {
 		arg = filepath.Join(dir, arg)
 	}
 	return filepath.Clean(arg)
