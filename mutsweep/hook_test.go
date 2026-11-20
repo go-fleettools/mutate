@@ -56,6 +56,9 @@ func TestPushesInFindsEveryGitpushAndWhereItRuns(t *testing.T) {
 		{"gitpush && git commit -m z", "/a", []push{{dir: "/a"}}},
 		{"git status && git log -1 && git fetch && gitpush", "/a", []push{{dir: "/a"}}},
 		{"git -C commit status && gitpush", "/a", []push{{dir: "/a"}}},
+		// Only GIT moves HEAD: another command whose second word is a git verb
+		// is not one (mutsweep found this unheld: hook.go's "is it git" test).
+		{"echo commit && gitpush", "/a", []push{{dir: "/a"}}},
 		// Not pushes: the word appears, but not as the command.
 		{"echo gitpush", "/a", nil},
 		{"git push origin x", "/a", nil},
