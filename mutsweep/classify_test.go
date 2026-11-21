@@ -192,6 +192,11 @@ func TestClassifyCorners(t *testing.T) {
 				`{"Action":"output","Package":"a","Test":"TestQ","Output":"panic: boom\n"}` + "\n" +
 				`{"Action":"output","Package":"a","Test":"TestP","Output":"bad\n"}` + "\n" +
 				ev("output", "a", "TestQ", "goroutine 7 [running]:\n") + ev("fail", "a", "TestP", "") + ev("fail", "a", "TestQ", ""), true, caught},
+		{"plain: assertion message contains panic:, then another test panics",
+			"--- FAIL: TestA (0.00s)\n    a_test.go:52: got panic: nil deref, want err\n--- FAIL: TestB (0.00s)\n" + trace + "FAIL\tx\t0.1s\n", false, caught},
+		{"json: assertion message contains panic:, then another test panics",
+			ev("output", "a", "TestA", "    a_test.go:52: got panic: nil deref, want err\n") + ev("fail", "a", "TestA", "") +
+				ev("output", "a", "TestB", "panic: boom\n") + ev("output", "a", "TestB", "goroutine 7 [running]:\n") + ev("fail", "a", "TestB", ""), true, caught},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, _ := classify([]byte(tt.out), tt.json)
