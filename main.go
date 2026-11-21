@@ -71,7 +71,7 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	m, err := newMutation(*file, *from, *to, *name)
+	m, err := newMutation(*file, *from, *to, *name, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "mutate:", err)
 		return 2
@@ -119,6 +119,11 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	return 1
 }
 
+// sourcePerm is only ever used for a file that is not there, which cannot
+// happen on this path: newMutation has already read it. atomicwrite keeps the
+// mode the file has.
+const sourcePerm = fs.FileMode(0o644)
+
 func verdict(wantPass bool) string {
 	if wantPass {
 		return "the suite still passes, as it should"
@@ -129,25 +134,26 @@ func verdict(wantPass bool) string {
 // mutation holds the original bytes, so a restore cannot depend on being
 // able to reverse the edit.
 //
-// It holds the original MODE because the atomic write needs it. os.WriteFile
-// applied its perm only when CREATING a file, so writing over an existing one
-// left the mode alone and the old hardcoded 0o644 never did anything. A rename
-// installs a new inode and carries the temporary file's 0o600 instead, so the
-// mode now has to be read and handed back on purpose. The restore's job is to
-// leave no trace, and a changed permission bit is a trace.
+// ⚠ It does NOT hold the mode. The restore's job is to leave no trace and a
+// changed permission bit is a trace, but the mode is a property of the FILE:
+// atomicwrite reads it off the target and hands it back, because a rename
+// installs a new inode that would otherwise carry the temporary file's 0o600.
+// Recording it here meant a second os.Stat whose error path a successful read
+// of the same file makes unreachable — mutsweep said SURVIVED, and it was
+// right.
+// ⛔ IT HOLDS THE WRITER IT COMPLAINS TO. A failed restore leaves a deliberate
+// defect in a source file, so it is said as loudly as possible — and a message
+// sent straight to os.Stderr is one no test can read, which is how that line
+// came to be the only refusal here that nothing held.
 type mutation struct {
 	path, from, to, name string
 	original             []byte
-	mode                 fs.FileMode
 	applied              bool
+	stderr               io.Writer
 }
 
-func newMutation(path, from, to, name string) (*mutation, error) {
+func newMutation(path, from, to, name string, stderr io.Writer) (*mutation, error) {
 	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +171,7 @@ func newMutation(path, from, to, name string) (*mutation, error) {
 		// one being described, and the report would name the small one.
 		return nil, fmt.Errorf("%s: the text to replace appears %d times — make it unique", path, n)
 	}
-	return &mutation{path: path, from: from, to: to, name: name, original: b, mode: fi.Mode().Perm()}, nil
+	return &mutation{path: path, from: from, to: to, name: name, original: b, stderr: stderr}, nil
 }
 
 func (m *mutation) label() string {
@@ -181,7 +187,7 @@ func (m *mutation) apply() error {
 	// that window leaves the file EMPTY. Measured 2026-11-21 on
 	// go-fleettools/prwait — a killed sweep left a 434-line source file at
 	// zero bytes. See internal/atomicwrite.
-	if err := atomicwrite.Write(m.path, []byte(out), m.mode); err != nil {
+	if err := atomicwrite.Write(m.path, []byte(out), sourcePerm); err != nil {
 		return err
 	}
 	m.applied = true
@@ -193,10 +199,10 @@ func (m *mutation) restore() {
 		return
 	}
 	m.applied = false
-	if err := atomicwrite.Write(m.path, m.original, m.mode); err != nil {
+	if err := atomicwrite.Write(m.path, m.original, sourcePerm); err != nil {
 		// Said as loudly as possible: the tree now holds a deliberate
 		// defect and the next commit would carry it.
-		fmt.Fprintf(os.Stderr, "mutate: COULD NOT RESTORE %s: %v\n", m.path, err)
+		fmt.Fprintf(m.stderr, "mutate: COULD NOT RESTORE %s: %v\n", m.path, err)
 	}
 }
 

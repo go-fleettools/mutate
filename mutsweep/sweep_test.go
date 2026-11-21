@@ -459,6 +459,36 @@ func Wait(n int) {
 	}
 }
 
+// ⛔ AND WHEN THE RESTORE OF LAST RESORT CANNOT WRITE, IT SAYS SO IN THOSE
+// WORDS. mutsweep answered SURVIVED for that guard, and the survivor is worse
+// than a missing message: with it gone, a failed restore returns the note of a
+// SUCCESSFUL one — "the mutation outlived mutate and was put back here" — about
+// a file still holding a deliberate defect, in the one situation where nothing
+// else is going to put it back.
+func TestARestoreOfLastResortThatCannotWriteSaysSo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a read-only directory does not stop a file being created on Windows")
+	}
+	dir := t.TempDir()
+	write(t, dir, "x.go", "if n <= 0 { // mutated\n")
+	path := filepath.Join(dir, "x.go")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	err := ensureRestored(path, []byte("package x\n"), nil)
+	if err == nil {
+		t.Fatal("a restore that could not be written reported nothing")
+	}
+	if !strings.Contains(err.Error(), "RESTORE FAILED") {
+		t.Errorf("error = %q, want it to say the restore FAILED", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error = %q, which does not name the file left mutated", err)
+	}
+}
+
 // buildStubborn compiles a stand-in for mutate that applies the replacement,
 // refuses to be asked to stop, and then sleeps.
 func buildStubborn(t *testing.T) string {

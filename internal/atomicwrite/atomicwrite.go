@@ -28,7 +28,59 @@ import (
 	"path/filepath"
 )
 
-// Write replaces path's contents with data, giving it perm.
+// tempFile is the part of *os.File that Write uses.
+//
+// ⛔ IT IS AN INTERFACE, AND createTemp AND chmod ARE VARIABLES, FOR ONE
+// REASON: so that a test can make each step fail. No arrangement of a real
+// filesystem that a test is allowed to build makes tmp.Write, tmp.Sync,
+// tmp.Close, or a chmod of a file this very process just created, return an
+// error — and mutsweep answered SURVIVED for all four of those guards plus the
+// CreateTemp one, which only went red by PANICKING on a nil file. A guard no
+// test can reach is a guard that is not there: the next edit removes it and
+// nothing says so.
+//
+// ⚠ The RENAME is deliberately NOT behind a seam. Renaming onto an existing
+// directory fails for real, so that guard is held by the filesystem itself,
+// and a real failure is worth more than an injected one.
+type tempFile interface {
+	Write(p []byte) (int, error)
+	Sync() error
+	Close() error
+	Name() string
+}
+
+// unusable stands in for a temporary file that could not be created.
+//
+// ⛔ A NIL FILE IS NOT AN ANSWER, and handing one back turned a missing guard
+// into a crash. os.CreateTemp returns a nil *os.File beside its error, and
+// (*os.File).Name DEREFERENCES its receiver — Write, Sync and Close all answer
+// ErrInvalid on a nil file, Name alone does not. So with the create guard
+// deleted this package CRASHED instead of answering wrongly, and mutsweep is
+// right that a crash is luck: it goes red because the next line happens to
+// dereference, and the first edit that moves that line leaves nothing holding
+// the guard at all. With a stand-in, the guard's absence is a WRONG ANSWER —
+// the create error replaced by a later one — which a test can assert about.
+type unusable struct{ err error }
+
+func (u unusable) Write([]byte) (int, error) { return 0, u.err }
+func (u unusable) Sync() error               { return u.err }
+func (u unusable) Close() error              { return u.err }
+func (u unusable) Name() string              { return "" }
+
+var (
+	createTemp = func(dir, pattern string) (tempFile, error) {
+		f, err := os.CreateTemp(dir, pattern)
+		// On nil, not on the error: the nil is what would be dereferenced.
+		if f == nil {
+			return unusable{err: err}, err
+		}
+		return f, err
+	}
+	chmod = os.Chmod
+)
+
+// Write replaces path's contents with data, keeping the mode path already has.
+// permIfNew is used only when path does not exist yet.
 //
 // The new bytes are written to a temporary file in path's OWN directory and
 // then renamed over it. A rename within one filesystem is atomic, so at every
@@ -40,9 +92,21 @@ import (
 // is not atomic — it is a copy and an unlink — so a temporary in the system
 // temp directory would reintroduce exactly the window this removes, while
 // looking like it had closed it.
-func Write(path string, data []byte, perm fs.FileMode) error {
+func Write(path string, data []byte, permIfNew fs.FileMode) error {
+	// ⛔ THE MODE IS A PROPERTY OF THE FILE, AND IT IS READ HERE RATHER THAN
+	// ASKED OF THE CALLER. Every caller wanted the same thing — put the file
+	// back exactly as it was — and each one had to stat the file to say so,
+	// which gave every call site an error path that CANNOT BE REACHED: a stat
+	// that fails after the bytes were read is a race no test can arrange.
+	// mutsweep answered SURVIVED for two of them, and an unreachable guard is
+	// not a guard, it is a line that will never be read again. Asked once, here,
+	// where the rename makes it necessary.
+	perm := permIfNew
+	if fi, err := os.Stat(path); err == nil {
+		perm = fi.Mode().Perm()
+	}
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".atomicwrite-*")
+	tmp, err := createTemp(dir, "."+filepath.Base(path)+".atomicwrite-*")
 	if err != nil {
 		// ⛔ RETURNED, NOT WORKED AROUND. An unwritable directory means this
 		// write cannot be made safely, and falling back to a truncating
@@ -81,7 +145,7 @@ func Write(path string, data []byte, perm fs.FileMode) error {
 	// CreateTemp makes that 0o600, so without this chmod every file a sweep
 	// touched would come back private. Set before the rename, so path is
 	// never visible with the wrong permissions.
-	if err := os.Chmod(name, perm); err != nil {
+	if err := chmod(name, perm); err != nil {
 		return fmt.Errorf("atomicwrite %s: %w", path, err)
 	}
 	if err := os.Rename(name, path); err != nil {

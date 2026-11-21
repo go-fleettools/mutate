@@ -511,6 +511,15 @@ the ledger was written atomically and the source code was not.
 ⚠ The file that was emptied happened to be committed, so nothing was lost. An
 hour of uncommitted work would have been.
 
+⛔ **A swept file keeps the mode it had**, and that now takes doing. A rename
+installs a *new inode*, which carries the temporary file's `0o600`, so an
+executable or a group-readable source would have come back private after every
+mutation. The mode is read off the target and handed back — read **once**, in
+the writer, rather than by each caller: the callers that used to stat the file
+themselves each gained an error path that cannot be reached, since a stat
+failing after the same file has just been read is a race no test can arrange.
+`mutsweep` reported two of them as surviving, and it was right to.
+
 A replacement matching **twice** is refused too: replacing both is a larger
 mutation than the one being described, and the report would name the small
 one.
