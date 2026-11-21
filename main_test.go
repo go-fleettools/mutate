@@ -5,11 +5,85 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 // A tool that proves tests can fail has to be able to fail itself.
+
+// ⛔⛔ A RESTORE THAT FAILED IS SAID OUT LOUD, and nothing held that either.
+// This is the loudest line in the tool: the tree still holds a deliberate
+// defect, the process is about to end, and the next commit would carry it. With
+// the guard deleted the write fails in silence and mutate exits looking normal
+// — the third of the three failures this tool's doc comment promises to make
+// impossible, "the restore was forgotten", restored to possibility.
+func TestARestoreThatCannotBeWrittenIsSaidOutLoud(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a read-only directory does not stop a file being created on Windows")
+	}
+	dir := t.TempDir()
+	path := write(t, dir, "g.go", "keep me\n")
+	var errb bytes.Buffer
+	m, err := newMutation(path, "keep", "drop", "", &errb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.apply(); err != nil {
+		t.Fatal(err)
+	}
+	// The directory closes AFTER the mutation landed, so the restore is the
+	// step with nowhere to write.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	m.restore()
+	if !strings.Contains(errb.String(), "COULD NOT RESTORE") {
+		t.Errorf("it said %q, and never that the file was NOT put back", errb.String())
+	}
+	if !strings.Contains(errb.String(), path) {
+		t.Errorf("it said %q, which does not name the file left mutated", errb.String())
+	}
+}
+
+// ⛔ A MUTATION THAT COULD NOT BE WRITTEN IS NOT A VERDICT ABOUT THE CODE, and
+// mutsweep answered SURVIVED for the guard that says so. With it gone, apply
+// reports success without having changed a byte: the command then runs against
+// UNMUTATED code, passes, and the tool prints "THE SUITE SURVIVED IT. Nothing
+// covers this." That is the FIRST FAILURE in this file's own doc comment — a
+// mutation that never happened read as a weak test — arrived at from the other
+// side.
+func TestAMutationThatCannotBeWrittenIsRefused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a read-only directory does not stop a file being created on Windows")
+	}
+	dir := t.TempDir()
+	const original = "keep me\n"
+	path := write(t, dir, "g.go", original)
+	// r-x: the file stays readable and writable, no new entry can be made, so
+	// the atomic write has nowhere to put its temporary.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	code, out, errb := runMutate(t, "-file", path, "-from", "keep", "-to", "drop", "--", "true")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2 (refused)\nstdout: %q\nstderr: %q", code, out, errb)
+	}
+	if !strings.Contains(errb, "mutate:") {
+		t.Errorf("stderr does not say who refused: %q", errb)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the file is gone: %v", err)
+	}
+	if string(after) != original {
+		t.Errorf("the file reads %q, want the original back", after)
+	}
+}
 
 func write(t *testing.T, dir, name, body string) string {
 	t.Helper()

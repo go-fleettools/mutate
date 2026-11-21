@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/go-fleettools/mutate/internal/atomicwrite"
 )
 
 // verdict is what one deleted guard did to the suite.
@@ -461,7 +463,14 @@ func ensureRestored(path string, before []byte, readErr error) error {
 	if bytes.Equal(now, before) {
 		return nil
 	}
-	if err := os.WriteFile(path, before, 0o644); err != nil {
+	// ⛔ ATOMICALLY. This is the restore of last resort — it runs when mutate
+	// did not restore the file itself, which is exactly the case where
+	// something killed mutate. Writing it back with a truncating write gives
+	// the kill a second window to land in, on the very path that is already
+	// known to be at risk.
+	// The perm is a fallback for a file that is not there, which this path has
+	// just read: atomicwrite keeps the mode the file has.
+	if err := atomicwrite.Write(path, before, 0o644); err != nil {
 		return fmt.Errorf("RESTORE FAILED for %s: %w", path, err)
 	}
 	return fmt.Errorf("the mutation outlived mutate and was put back here")
