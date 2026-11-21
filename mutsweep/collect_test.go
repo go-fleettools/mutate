@@ -47,9 +47,9 @@ func InASelect(c chan int) error {
 	}
 }
 
-// The initialiser form is NOT a refusal this deletes: removing it would remove
-// the call as well, which is a larger change than the one that would be
-// reported.
+// The initialiser form IS a refusal: skipping it made a guard invisible, so a
+// sweep read as clean. It is mutated by making its condition unreachable, never
+// deleted, because deleting it would remove the call as well.
 func WithAnInitialiser() error {
 	if err := do(); err != nil {
 		return err
@@ -67,7 +67,7 @@ func do() error { return nil }
 	for _, g := range got {
 		conds = append(conds, g.cond)
 	}
-	want := []string{"n < 0", "kind > 9", "n < 0"}
+	want := []string{"n < 0", "kind > 9", "n < 0", "err != nil"}
 	if len(got) != len(want) {
 		t.Fatalf("found %d guards %v, want %d %v", len(got), conds, len(want), want)
 	}
@@ -77,12 +77,49 @@ func do() error { return nil }
 		}
 	}
 	for _, g := range got {
+		if g.cond == "err != nil" {
+			// The init-clause guard: its mutation keeps the init statement and
+			// the body, and only makes the condition unreachable.
+			if !strings.HasSuffix(g.from, g.cond) || !strings.HasSuffix(g.to, "false && ("+g.cond+")") {
+				t.Errorf("init-clause mutation is not false && (C): from=%q to=%q", g.from, g.to)
+			}
+			continue
+		}
 		if !strings.HasSuffix(strings.TrimSpace(g.from), "}") {
 			t.Errorf("the text to delete does not end at the guard: %q", g.from)
 		}
 		if !strings.HasPrefix(g.from, g.to) {
 			t.Errorf("what replaces it is not its own context: from=%q to=%q", g.from, g.to)
 		}
+		// Deleting is the first try; false && (C) is held back for when it does
+		// not compile.
+		if !strings.HasSuffix(g.altTo, "false && ("+g.cond+")") || strings.HasSuffix(g.altFrom, "}") {
+			t.Errorf("no fallback mutation for %q: altFrom=%q altTo=%q", g.cond, g.altFrom, g.altTo)
+		}
+	}
+}
+
+// -boundary mode visits the condition of an init-clause if as well.
+func TestBoundaryVisitsInitClauseConditions(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module x\n\ngo 1.27.1\n")
+	write(t, dir, "x.go", `package x
+
+import "errors"
+
+func F(n int) error {
+	if m := n * 2; m > 10 {
+		return errors.New("big")
+	}
+	return nil
+}
+`)
+	got, _, err := collect(config{dir: dir, mode: modeBoundary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !strings.Contains(got[0].cond, "m > 10") || !strings.HasSuffix(got[0].to, ">=") {
+		t.Fatalf("want the m > 10 comparison flipped to >=, got %+v", got)
 	}
 }
 

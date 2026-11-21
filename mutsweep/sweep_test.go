@@ -143,7 +143,87 @@ func TestOnlyTheHappyPath(t *testing.T) {
 			want: survived,
 		},
 		{
-			name: "not a mutant: deleting it orphans a variable",
+			name: "caught: an init-clause guard held by a test",
+			source: `package x
+
+import "errors"
+
+var errNegative = errors.New("negative")
+
+func Check(n int) error {
+	if m := n; m < 0 {
+		return errNegative
+	}
+	return nil
+}
+`,
+			test: `package x
+
+import "testing"
+
+func TestRefuses(t *testing.T) {
+	if Check(-1) == nil {
+		t.Fatal("a negative was accepted")
+	}
+}
+`,
+			want: caught,
+		},
+		{
+			name: "survived: an init-clause guard nothing asks about",
+			source: `package x
+
+import "errors"
+
+var errNegative = errors.New("negative")
+
+func Check(n int) error {
+	if m := n; m < 0 {
+		return errNegative
+	}
+	return nil
+}
+`,
+			test: `package x
+
+import "testing"
+
+func TestOnlyTheHappyPath(t *testing.T) {
+	if Check(1) != nil {
+		t.Fatal("a positive was refused")
+	}
+}
+`,
+			want: survived,
+		},
+		{
+			name: "caught: deleting it orphans a variable, false && (C) does not",
+			source: `package x
+
+import "errors"
+
+func Check(n int) (int, error) {
+	doubled := n * 2
+	if n < 0 {
+		return doubled, errors.New("negative")
+	}
+	return 0, nil
+}
+`,
+			test: `package x
+
+import "testing"
+
+func TestRefuses(t *testing.T) {
+	if _, err := Check(-1); err == nil {
+		t.Fatal("a negative was accepted")
+	}
+}
+`,
+			want: caught,
+		},
+		{
+			name: "survived (was: not a mutant): deleting it orphans a variable",
 			source: `package x
 
 import "errors"
@@ -166,7 +246,7 @@ func TestHappy(t *testing.T) {
 	}
 }
 `,
-			want: noBuild,
+			want: survived,
 		},
 		{
 			name: "hung: without it the test never returns",

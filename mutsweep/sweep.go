@@ -34,6 +34,9 @@ type result struct {
 	verdict verdict
 	took    time.Duration
 	note    string
+	// compileFail: the mutant did not compile (as opposed to any other reason for
+	// noBuild), the one case worth retrying with the other mutation.
+	compileFail bool
 }
 
 // marginOverBaseline is how much longer than the unmutated suite the timeout has
@@ -196,7 +199,30 @@ func lastOf(b []byte) string {
 
 // one runs a single deletion through mutate, which owns applying it and putting
 // the file back -- including when this process is interrupted while it waits.
+//
+// Deleting an `if` can leave a variable used only in its condition unused, and
+// the mutant then fails to compile: 8 of 11 refusals in one file read "not a
+// mutant" that way, which is a guard nothing could test. So a deletion that does
+// not compile is retried as the condition replaced by `false && (C)`, which keeps
+// every use and makes the body unreachable.
 func one(cfg config, g guard, cmd []string) result {
+	r := oneMutation(cfg, g, cmd)
+	if r.verdict != noBuild || !r.compileFail || g.altFrom == "" {
+		return r
+	}
+	alt := g
+	alt.from, alt.to, alt.altFrom, alt.altTo = g.altFrom, g.altTo, "", ""
+	r2 := oneMutation(cfg, alt, cmd)
+	r2.guard = g
+	if r2.verdict == noBuild {
+		r2.note = "neither the deletion nor false && (C) compiles: " + r2.note
+	} else {
+		r2.note = "by false && (C), deleting it does not compile; " + r2.note
+	}
+	return r2
+}
+
+func oneMutation(cfg config, g guard, cmd []string) result {
 	// The zero value must be safe: a config built by hand with no run-in once
 	// ran the command in THIS tool's directory, where `go test ./...` is this
 	// tool's own suite, and the mutant was reported HUNG after two minutes of
@@ -280,7 +306,7 @@ func one(cfg config, g guard, cmd []string) result {
 		// that is a statement about this machine, never about the code.
 		r.verdict, r.note = unrun, "mutate rejected a flag: "+trim(strings.TrimSpace(lastLine(string(out))), 70)
 	case strings.Contains(string(out), "DID NOT COMPILE"):
-		r.verdict, r.note = noBuild, firstBuildError(string(out))
+		r.verdict, r.note, r.compileFail = noBuild, firstBuildError(string(out)), true
 	case exitCode(err) == 1:
 		r.verdict, r.note = survived, took.Round(time.Second).String()
 	case exitCode(err) < 0:
