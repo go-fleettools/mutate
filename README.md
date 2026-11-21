@@ -492,7 +492,24 @@ in those twenty-five. Each is now impossible rather than a matter of care.
 | --- | --- | --- |
 | the regex matched nothing | the "mutation" ran against **unchanged code**, the test passed, and that read as the test being weak | exact text, never a pattern; **zero matches is refused** before anything runs |
 | the mutant did not compile | not a failing test — **no test at all**, and identical to a real failure in a `grep FAIL` | build failures are told apart and reported as *"proves nothing"* |
-| the restore was forgotten | a deliberate defect left in a tree, carried by the next commit | restored whatever happens, **including on SIGINT** |
+| the restore was forgotten | a deliberate defect left in a tree, carried by the next commit | restored whatever happens, **including on SIGINT** — and the write itself is atomic, so no handler has to run for the file to survive |
+
+⛔ **A restore on a signal is not enough, and it took a lost file to see it.**
+Measured 2026-11-21: a `mutsweep` was killed (exit 137 — **SIGKILL**) while
+sweeping `go-fleettools/prwait`, and left `quota.go` at **zero bytes**. Not
+mutated, not half-written: 434 lines gone, `wc -l` answering 0. The cause was
+`os.WriteFile`, which **truncates and then writes** — between those two steps
+the file is empty on disk, and SIGKILL cannot be trapped, so the signal
+handler above could never have covered it.
+
+The window no longer exists. Every mutation and every restore now writes a
+temporary file in the target's own directory and **renames** it over the
+target, so at each instant the file holds either all of its old contents or
+all of the new ones. The pattern was already here, in `mutsweep/record.go`:
+the ledger was written atomically and the source code was not.
+
+⚠ The file that was emptied happened to be committed, so nothing was lost. An
+hour of uncommitted work would have been.
 
 A replacement matching **twice** is refused too: replacing both is a larger
 mutation than the one being described, and the report would name the small

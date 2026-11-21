@@ -39,11 +39,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
+
+	"github.com/go-fleettools/mutate/internal/atomicwrite"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -125,14 +128,26 @@ func verdict(wantPass bool) string {
 
 // mutation holds the original bytes, so a restore cannot depend on being
 // able to reverse the edit.
+//
+// It holds the original MODE because the atomic write needs it. os.WriteFile
+// applied its perm only when CREATING a file, so writing over an existing one
+// left the mode alone and the old hardcoded 0o644 never did anything. A rename
+// installs a new inode and carries the temporary file's 0o600 instead, so the
+// mode now has to be read and handed back on purpose. The restore's job is to
+// leave no trace, and a changed permission bit is a trace.
 type mutation struct {
 	path, from, to, name string
 	original             []byte
+	mode                 fs.FileMode
 	applied              bool
 }
 
 func newMutation(path, from, to, name string) (*mutation, error) {
 	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +165,7 @@ func newMutation(path, from, to, name string) (*mutation, error) {
 		// one being described, and the report would name the small one.
 		return nil, fmt.Errorf("%s: the text to replace appears %d times — make it unique", path, n)
 	}
-	return &mutation{path: path, from: from, to: to, name: name, original: b}, nil
+	return &mutation{path: path, from: from, to: to, name: name, original: b, mode: fi.Mode().Perm()}, nil
 }
 
 func (m *mutation) label() string {
@@ -161,12 +176,12 @@ func (m *mutation) label() string {
 }
 
 func (m *mutation) apply() error {
-	fi, err := os.Stat(m.path)
-	if err != nil {
-		return err
-	}
 	out := strings.Replace(string(m.original), m.from, m.to, 1)
-	if err := os.WriteFile(m.path, []byte(out), fi.Mode().Perm()); err != nil {
+	// ⛔ ATOMICALLY: os.WriteFile truncates and then writes, and a kill in
+	// that window leaves the file EMPTY. Measured 2026-11-21 on
+	// go-fleettools/prwait — a killed sweep left a 434-line source file at
+	// zero bytes. See internal/atomicwrite.
+	if err := atomicwrite.Write(m.path, []byte(out), m.mode); err != nil {
 		return err
 	}
 	m.applied = true
@@ -178,7 +193,7 @@ func (m *mutation) restore() {
 		return
 	}
 	m.applied = false
-	if err := os.WriteFile(m.path, m.original, 0o644); err != nil {
+	if err := atomicwrite.Write(m.path, m.original, m.mode); err != nil {
 		// Said as loudly as possible: the tree now holds a deliberate
 		// defect and the next commit would carry it.
 		fmt.Fprintf(os.Stderr, "mutate: COULD NOT RESTORE %s: %v\n", m.path, err)
