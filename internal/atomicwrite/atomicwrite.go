@@ -135,6 +135,11 @@ func Write(path string, data []byte, permIfNew fs.FileMode) error {
 		return fmt.Errorf("atomicwrite %s: %w", path, err)
 	}
 	if err := tmp.Close(); err != nil {
+		// ⚠ The target is untouched either way. What a failing Close can leave
+		// behind is the TEMPORARY: on Windows an open file cannot be deleted,
+		// so a Close that fails without releasing the handle would defeat the
+		// deferred removal. A stray dotfile beside the target is the whole
+		// cost, and it is not worth a second Close to chase.
 		return fmt.Errorf("atomicwrite %s: %w", path, err)
 	}
 	// ⛔ THE MODE HAS TO BE CARRIED DELIBERATELY NOW, and it did not before.

@@ -263,11 +263,20 @@ func (f *fakeTemp) Sync() error {
 	return f.file.Sync()
 }
 
+// ⛔⛔ THE REAL FILE IS ALWAYS CLOSED, EVEN WHEN AN ERROR IS REPORTED, and
+// getting that wrong manufactured a defect on a platform this machine cannot
+// run. (*os.File).Close releases the descriptor and THEN returns its error; a
+// fake that returned an error while keeping the handle open does not model it.
+// On Windows an open file cannot be deleted, so the deferred os.Remove failed
+// and left the temporary behind — "the directory holds 2 entries, want 1" on
+// windows-latest, 2026-11-21, green on macOS and Linux. The writer was right
+// and the stand-in was lying about what a failure looks like.
 func (f *fakeTemp) Close() error {
+	err := f.file.Close()
 	if f.fail == "close" {
 		return f.err
 	}
-	return f.file.Close()
+	return err
 }
 
 func (f *fakeTemp) Name() string { return f.file.Name() }
