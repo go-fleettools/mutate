@@ -99,6 +99,257 @@ func do() error { return nil }
 	}
 }
 
+// ⛔ The other half of "what is a refusal" — the shapes that are NOT one. Both
+// of the sentences that reject a shape SURVIVED their own mutation at the moment
+// the collection was restructured: nothing in the suite had an `if` whose body is
+// long, and nothing had one that does not end in a return, so "a refusal is a
+// SHORT body ending in a RETURN" was enumerated nowhere and asserted nowhere.
+//
+// ⛔ And one of the two could not be held by any assertion as it was written:
+// `len(List) == 0 || len(List) > 3` guarded an index of `len-1` on the next line,
+// so deleting it made the suite red with a PANIC. A panic red is luck — it is the
+// line BELOW doing the catching, and the next change that reorders them makes the
+// same mutant survive in silence. The emptiness is now refused by the return
+// test, which a nil last statement fails like any other non-return, and what is
+// left is two bounds a test can state: the length, and the return.
+func TestWhatIsNotARefusal(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "x.go", `package x
+
+import "errors"
+
+// Four statements ending in a return: too long to be a refusal. A guard is
+// read by a human in one glance; a body this long is a branch of the function.
+func Longer(n int) error {
+	if n > 100 {
+		a := n
+		b := a
+		c := b
+		return errors.New("big")
+	}
+	return nil
+}
+
+// Exactly three: the bound is inclusive, which is what makes the line above a
+// bound rather than an accident.
+func AtTheBound(n int) error {
+	if n > 30 {
+		a := n
+		_ = a
+		return errors.New("medium")
+	}
+	return nil
+}
+
+// Short, but its last statement is not a return: it decides, it does not refuse.
+func NotAReturn(n int) int {
+	out := 0
+	if n > 10 {
+		out = -n
+	}
+	return out
+}
+
+// An empty body. Nothing to delete, nothing to refuse -- and this is the shape
+// that used to be rejected by a length check whose removal panicked.
+func AnEmptyBody(n int) int {
+	if n > 5 {
+	}
+	return n
+}
+`)
+	got, _, err := collect(config{dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conds []string
+	for _, g := range got {
+		conds = append(conds, g.cond)
+	}
+	want := []string{"n > 30"}
+	if len(conds) != len(want) || conds[0] != want[0] {
+		t.Fatalf("enumerated %v, want exactly %v -- a shape that is not a refusal was swept", conds, want)
+	}
+}
+
+// ⛔⛔ An `else` branch used to disqualify a refusal, and the exclusion was
+// invisible: not swept, not counted, not reported, so a package of `if`/`else`
+// guards read as a CLEAN sweep. This is the control file the gap was measured
+// with at v0.13.0 — five shapes, and only the first two and the last were
+// enumerated.
+//
+// ⭐ The pair that isolates the cause is D and E: the same condition, the same
+// two branches, differing ONLY by the `else`. Without it, "an if with an else is
+// skipped" and "an else-if condition is skipped" are two readings of the same
+// symptom, and the first version of this finding named the wrong one (it blamed
+// the init clause, which #29 had already fixed).
+func TestCollectSeesAnIfThatHasAnElseBranch(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "x.go", `package x
+
+func A(x int) int {
+	if x > 0 {
+		return 1
+	}
+	return 0
+}
+
+func B(m map[string]int, k string) int {
+	if v, ok := m[k]; ok {
+		return v
+	}
+	return -1
+}
+
+func C(x int) int {
+	if x > 10 {
+		return 2
+	} else if x > 5 {
+		return 1
+	}
+	return 0
+}
+
+func D(x int) int {
+	if x > 3 {
+		return 1
+	} else {
+		return 0
+	}
+}
+
+func E(x int) int {
+	if x > 3 {
+		return 1
+	}
+	return 0
+}
+`)
+	got, _, err := collect(config{dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conds []string
+	for _, g := range got {
+		conds = append(conds, g.cond)
+	}
+	want := []string{"x > 0", "ok", "x > 10", "x > 5", "x > 3", "x > 3"}
+	if len(conds) != len(want) {
+		t.Fatalf("found %d guards %v, want %d %v", len(conds), conds, len(want), want)
+	}
+	for i := range want {
+		if conds[i] != want[i] {
+			t.Errorf("guard %d is %q, want %q", i, conds[i], want[i])
+		}
+	}
+	// ⛔ Deletion is the WRONG mutation for an if that has an else: it removes
+	// both arms, which is "the decision removed" and not "the guard removed", and
+	// the suite would then go red for a reason that says nothing about the
+	// condition. The else-bearing ones must carry false && (C) as their PRIMARY
+	// mutation, exactly as an init-clause guard does.
+	for _, i := range []int{2, 3, 4} {
+		g := got[i]
+		if !strings.HasSuffix(g.to, "false && ("+g.cond+")") {
+			t.Errorf("guard %q (with an else) is not mutated by false && (C): to=%q", g.cond, g.to)
+		}
+		if strings.HasSuffix(strings.TrimSpace(g.from), "}") {
+			t.Errorf("guard %q (with an else) would be DELETED, both arms with it: from=%q", g.cond, g.from)
+		}
+		if g.altFrom != "" || g.altTo != "" {
+			t.Errorf("guard %q offers deletion as a fallback: altFrom=%q altTo=%q", g.cond, g.altFrom, g.altTo)
+		}
+	}
+	// And the control's other half: the same guard without an else is still
+	// deleted, and still keeps false && (C) as the fallback for when deleting
+	// does not compile.
+	last := got[len(got)-1]
+	if !strings.HasSuffix(strings.TrimSpace(last.from), "}") {
+		t.Errorf("the else-less guard is no longer deleted: from=%q", last.from)
+	}
+	if !strings.HasSuffix(last.altTo, "false && ("+last.cond+")") {
+		t.Errorf("the else-less guard lost its fallback: altTo=%q", last.altTo)
+	}
+}
+
+// ⛔ A chain of three, because "it handles one else if" is how the next shape
+// gets forgotten: the walk follows the Else field for as long as it is an if.
+func TestCollectFollowsAWholeElseIfChain(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "x.go", `package x
+
+func F(x int) string {
+	if x > 30 {
+		return "a"
+	} else if x > 20 {
+		return "b"
+	} else if x > 10 {
+		return "c"
+	} else {
+		return "d"
+	}
+}
+`)
+	got, _, err := collect(config{dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conds []string
+	for _, g := range got {
+		conds = append(conds, g.cond)
+	}
+	want := []string{"x > 30", "x > 20", "x > 10"}
+	if len(conds) != len(want) {
+		t.Fatalf("found %d guards %v, want %d %v", len(conds), conds, len(want), want)
+	}
+	for i := range want {
+		if conds[i] != want[i] {
+			t.Errorf("guard %d is %q, want %q", i, conds[i], want[i])
+		}
+	}
+	// Each condition is reported once. A chain walked both as a chain and as a
+	// statement would double every refusal after the first, and the sweep's own
+	// count is what a campaign is audited against.
+	seen := map[string]int{}
+	for _, c := range conds {
+		seen[c]++
+	}
+	for c, n := range seen {
+		if n != 1 {
+			t.Errorf("condition %q reported %d times", c, n)
+		}
+	}
+}
+
+// -boundary mode reaches an else-if's comparison too, which is the off-by-one a
+// chain of range tests hides.
+func TestBoundaryVisitsAnElseIfCondition(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module x\n\ngo 1.27.1\n")
+	write(t, dir, "x.go", `package x
+
+func F(n int) int {
+	if n > 10 {
+		return 2
+	} else if n > 5 {
+		return 1
+	}
+	return 0
+}
+`)
+	got, _, err := collect(config{dir: dir, mode: modeBoundary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("found %d comparisons, want 2 (both arms of the chain): %+v", len(got), got)
+	}
+	for _, g := range got {
+		if !strings.HasSuffix(g.to, ">=") {
+			t.Errorf("comparison %q was not moved to the other side of its edge: to=%q", g.cond, g.to)
+		}
+	}
+}
+
 // -boundary mode visits the condition of an init-clause if as well.
 func TestBoundaryVisitsInitClauseConditions(t *testing.T) {
 	dir := t.TempDir()

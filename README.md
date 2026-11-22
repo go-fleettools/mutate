@@ -262,6 +262,21 @@ hand:
   and then an index panic is the commonest test there is. A panic value that
   prints like an assertion line is not one either. What a test that **passed**
   logged (`go test -v` prints it) does not count.
+- **⛔ An assertion line is never the START of a panic**, whatever its message
+  says. The runtime prints `panic: …` at **column 0**; `t.Error` and `t.Fatal`
+  print an *indented* source position, so the line's own prefix states who printed
+  it and the "ambiguity resolves to PANIC" rule has no ambiguity to resolve. This
+  was a defect, not a refinement: a decline test that reports a recovered crash —
+  `t.Errorf("empty: %v, want …", err)` where `err` wraps `panic: runtime error:
+  …`, which is the ordinary shape of a test written to hold a nil check — tainted
+  *its own* test, its assertion lines were discarded, and a guard held **by an
+  assertion** was certified `caught by PANIC`. Measured on `go-pdfkit/reader`
+  `signature.go:69` under v0.11.0: rewording that helper from `panic: %v` to
+  `crashed (recovered): %v`, with no change to what the test asserts, turned the
+  same sweep into `caught`. ⭐ A verdict that moves with the wording of a message
+  is not a measurement. The control is `review3/framepanic`, whose panic *value*
+  prints an assertion-looking line: its `panic:` is at column 0 on the line
+  before, so it is still a panic.
 - **A panic** is a line holding `panic:` followed, at any distance, by the
   runtime's `goroutine N [state]:` header; a message of twenty lines, or a 100 KB
   line that test2json delivers in fragments (joined per test before matching), is
@@ -352,6 +367,82 @@ tests). `mutsweep` retries it as `false && (C)` and reports the verdict of that
 run, with a note saying so. "not a mutant" is now only for a guard where neither
 mutation compiles. `-mutate boundary` visits the conditions of init-clause
 `if`s too.
+
+### A refusal with an `else`, and the `else if` nobody listed
+
+⛔⛔ An `if` that **had an `else` branch was excluded outright**, and so was every
+`else if`: not swept, not counted, not reported, so a package of `if`/`else`
+guards read as a **clean sweep** about a shape the walk never looked at. Two
+different reasons, one symptom — the exclusion was explicit for the first, and
+an `else if` is simply **not an element of any statement list**: it lives in the
+`Else` field of the `if` before it, so a walk over statement lists reaches its
+*body* and never its *condition*.
+
+Measured at **v0.13.0** against a control file of five shapes, now
+`TestCollectSeesAnIfThatHasAnElseBranch`:
+
+| shape | v0.13.0 | now |
+|---|---|---|
+| `if x > 0 { … }` | listed | listed |
+| `if v, ok := m[k]; ok { … }` | listed | listed |
+| `if x > 10 { … } else if x > 5 { … }` | **neither condition** | both |
+| `if x > 3 { … } else { … }` | **nothing** | listed |
+| the same two branches with no `else` | listed | listed |
+
+⭐ The last two rows are the **control**: the same condition, the same two
+branches, differing only by the `else`, and only one of them was swept. Without
+that pair, *"an `if` with an `else` is skipped"* and *"an `else if` condition is
+skipped"* are two readings of one symptom — and the first account of this
+finding named neither, blaming the init clause that the section above had
+already fixed.
+
+**Deletion is the wrong mutation here**, which is most likely why the exclusion
+was written: deleting `if C { A } else { B }` removes *both* arms, which is "the
+decision removed" rather than "the guard removed", and a suite would go red for
+a reason that says nothing about `C`. So the mutation is the one the section
+above already provides — the condition becomes `false && (C)`, every arm stays
+compilable, and the `else` arm runs unconditionally. Nothing new was needed but
+the removal of a skip.
+
+⛔ A refusal is mutated that way when it has an Init clause, **or** an `else`,
+**or is itself somebody's `else`** — and the third is not implied by the other
+two. The **last** link of a chain (`} else if x > 5 { return 1 }`) has neither an
+Init nor an `else` of its own, and deleting its bytes leaves a dangling
+`} else` that does not compile. What disqualifies deletion is being an `else`,
+not having one.
+
+⚠ What this is worth, stated rather than inflated: on `go-fleettools/fleettools`
+it moved `cmd/recur` from **61 refusals to 62** and left `cmd/gotest` (16),
+`internal/cli` (13) and `internal/fleet` unchanged, and this repository's own
+`mutsweep` package stayed at **104** — a codebase that returns early instead of
+writing `else` has few of these. The gain is not a count: it is that a sweep no
+longer reports *clean* about a shape it never looked at.
+
+⛔ And the gate caught the author of the gate. Extracting the per-`if` collection
+into its own function made its two **rejection** sentences *changed* refusals, so
+`mutsweep -hook` demanded a sweep of them — and **both SURVIVED**: nothing in the
+suite had an `if` with a long body, and nothing had one that does not end in a
+`return`, so *"a refusal is a **short** body ending in a **return**"*, the
+definition this whole tool rests on, was asserted **nowhere**.
+`TestWhatIsNotARefusal` states it now, with the bound inclusive on both sides —
+three statements listed, four not — because *"long bodies are excluded"* is not a
+bound.
+
+⛔⛔ One of those two **could not be held by any assertion as it was written**:
+
+```go
+if len(ifs.Body.List) == 0 || len(ifs.Body.List) > 3 { return nil }
+if _, isReturn := ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt); !isReturn { … }
+```
+
+Delete the first line and the second indexes `-1`, so the suite goes red with a
+**panic** — and a panic red is the verdict this tool prints *beside the
+survivors*, because the line doing the catching is the one below, and the next
+change that reorders the two makes the same mutant survive in silence. The
+emptiness is now refused by the return test itself (a `nil` last statement is not
+a `*ast.ReturnStmt`), which leaves two bounds a test can state. ⭐ **A guard whose
+removal panics is a guard no test holds** — write it so the removal fails an
+assertion, which here cost one local variable and no behaviour at all.
 
 ### Boundaries: `-mutate boundary`
 

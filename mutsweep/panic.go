@@ -169,6 +169,24 @@ func panicked(lines []outLine, passed map[testKey]bool) (tainted map[testKey]boo
 		if !strings.Contains(l.text, "panic:") || passed[testKey{l.pkg, l.test}] {
 			continue
 		}
+		// ⛔ An ASSERTION LINE is never the start of a panic, whatever its message
+		// says. The runtime prints `panic: …` at column 0; t.Error and t.Fatal print
+		// an INDENTED source position, which is what assertionLine matches — so the
+		// line's own prefix says who printed it and nothing is ambiguous.
+		//
+		// Without this, a decline test that reports a recovered crash
+		// (`t.Errorf("empty: %v, want …", err)` where err wraps `panic: …`) tainted
+		// its own test, `decide` discarded its assertion lines, and a guard held by
+		// an assertion was certified `caught by PANIC` — the verdict that means "this
+		// red is luck". Measured on go-pdfkit/reader signature.go:69 under v0.11.0:
+		// rewording the helper from `panic: %v` to `crashed (recovered): %v`, with no
+		// change to what the test asserts, turned the same sweep into `caught`.
+		// ⭐ It does not weaken the file's "ambiguity resolves to PANIC" rule: a
+		// panic whose VALUE prints an assertion-looking line (testdata/review3/
+		// framepanic) still carries `panic:` at column 0 on the line before.
+		if assertionLine.MatchString(l.text) {
+			continue
+		}
 		if !traceFollows(lines[i+1:]) {
 			continue
 		}
