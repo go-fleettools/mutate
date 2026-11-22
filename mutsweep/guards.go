@@ -318,58 +318,119 @@ func guardsIn(dir, p string, src []byte, boundary bool) ([]guard, error) {
 		}
 		for _, stmt := range list {
 			ifs, ok := stmt.(*ast.IfStmt)
-			// An `if` with an Init clause is a refusal like any other. It was
-			// skipped here once, and a skipped guard is the worst kind: not
-			// swept, not counted, not reported, so the sweep read as clean.
-			if !ok || ifs.Else != nil || len(ifs.Body.List) == 0 || len(ifs.Body.List) > 3 {
+			if !ok {
 				continue
 			}
-			if _, isReturn := ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt); !isReturn {
-				continue
+			// ⛔⛔ AN `else if` IS NOT AN ELEMENT OF ANY STATEMENT LIST. It lives
+			// in the Else field of the `if` before it, so the walk above reaches
+			// its BODY (a BlockStmt) and never its CONDITION. The chain is
+			// followed here for that reason, and the whole chain is one `for`
+			// rather than a recursion so an `else if else if` cannot be the shape
+			// that gets forgotten next.
+			chained := false
+			for cur := ifs; cur != nil; {
+				out = append(out, guardsOfIf(dir, p, fset, src, cur, boundary, chained)...)
+				next, isChain := cur.Else.(*ast.IfStmt)
+				if !isChain {
+					break
+				}
+				cur, chained = next, true
 			}
-			if boundary {
-				out = append(out, boundaries(dir, p, fset, string(src), ifs.Cond)...)
-				continue
-			}
-			start := fset.Position(ifs.Pos())
-			end := fset.Position(ifs.End())
-			text := string(src[start.Offset:end.Offset])
-			// Take the newline with it, so deleting the guard does not
-			// leave a blank line where it stood and gofmt has nothing to
-			// say about the mutant.
-			if end.Offset < len(src) && src[end.Offset] == '\n' {
-				text += "\n"
-			}
-			from, to := unique(string(src), start.Offset, start.Offset+len(text))
-			var cond strings.Builder
-			printer.Fprint(&cond, fset, ifs.Cond)
-			g := guard{
-				dir:  dir,
-				file: p,
-				line: start.Line,
-				cond: strings.Join(strings.Fields(cond.String()), " "),
-				from: from,
-				to:   to,
-			}
-			// The second mutation: the condition becomes `false && (C)`. The Init
-			// statement and every use of its variables stay, so it compiles where
-			// deleting the whole `if` leaves them unused; the body is unreachable.
-			cs, ce := fset.Position(ifs.Cond.Pos()).Offset, fset.Position(ifs.Cond.End()).Offset
-			altFrom, _ := unique(string(src), cs, ce)
-			altTo := altFrom[:len(altFrom)-(ce-cs)] + "false && (" + string(src[cs:ce]) + ")"
-			if ifs.Init != nil {
-				// Deleting an if that has an Init clause also deletes a statement
-				// that may have effects, so it is not "the guard removed". Only
-				// the false && (C) mutation is faithful.
-				g.from, g.to = altFrom, altTo
-			} else {
-				g.altFrom, g.altTo = altFrom, altTo
-			}
-			out = append(out, g)
 		}
 		return true
 	})
 	return out, nil
+}
+
+// guardsOfIf is the refusal one `if` is, if it is one: a short body whose last
+// statement is a return, which is what makes it a REFUSAL rather than a branch.
+//
+// ⛔⛔ AN `else` BRANCH USED TO DISQUALIFY IT, and that exclusion was invisible:
+// not swept, not counted, not reported, so a package of `if`/`else` guards read
+// as a clean sweep. Measured at v0.13.0 against a control file of five shapes,
+// which is TestCollectSeesAnIfThatHasAnElseBranch:
+//
+//	if x > 0 { … }                        enumerated
+//	if v, ok := m[k]; ok { … }            enumerated (#29)
+//	if x > 10 { … } else if x > 5 { … }   NEITHER condition
+//	if x > 3 { … } else { … }             nothing
+//	the same two branches with no else    enumerated
+//
+// The last two are the control: same condition, same branches, differing only
+// by the `else`, and only one of them was swept.
+//
+// ⛔ DELETION IS THE WRONG MUTATION HERE, which is probably why it was excluded:
+// deleting `if C { A } else { B }` removes BOTH arms, which is not "the guard
+// removed" but "the decision removed", and the suite would go red for a reason
+// that says nothing about C. The faithful mutation is the one #29 already added
+// for Init clauses — the condition becomes `false && (C)`, every arm stays
+// compilable, and the else arm runs unconditionally. So this needed no new
+// mutation, only the removal of a skip.
+func guardsOfIf(dir, p string, fset *token.FileSet, src []byte, ifs *ast.IfStmt, boundary, chained bool) []guard {
+	// ⛔ The last statement, or nil for an empty body — and the nil is the point.
+	// This used to read `len(List) == 0 || len(List) > 3` followed by an index of
+	// `len-1`, which made the emptiness check a refusal NO TEST COULD HOLD: delete
+	// it and the next line indexes -1, so the suite goes red with a PANIC rather
+	// than with an assertion, and a panic red is luck (the next change that reorders
+	// these two lines makes the same mutant survive silently). A nil is not an
+	// *ast.ReturnStmt, so an empty body is refused by the test below, by the same
+	// sentence that refuses a body that does not end in a return.
+	var last ast.Stmt
+	if n := len(ifs.Body.List); n > 0 {
+		last = ifs.Body.List[n-1]
+	}
+	if len(ifs.Body.List) > 3 {
+		return nil
+	}
+	if _, isReturn := last.(*ast.ReturnStmt); !isReturn {
+		return nil
+	}
+	if boundary {
+		return boundaries(dir, p, fset, string(src), ifs.Cond)
+	}
+	start := fset.Position(ifs.Pos())
+	end := fset.Position(ifs.End())
+	text := string(src[start.Offset:end.Offset])
+	// Take the newline with it, so deleting the guard does not leave a blank
+	// line where it stood and gofmt has nothing to say about the mutant.
+	if end.Offset < len(src) && src[end.Offset] == '\n' {
+		text += "\n"
+	}
+	from, to := unique(string(src), start.Offset, start.Offset+len(text))
+	var cond strings.Builder
+	printer.Fprint(&cond, fset, ifs.Cond)
+	g := guard{
+		dir:  dir,
+		file: p,
+		line: start.Line,
+		cond: strings.Join(strings.Fields(cond.String()), " "),
+		from: from,
+		to:   to,
+	}
+	// The second mutation: the condition becomes `false && (C)`. The Init
+	// statement and every use of its variables stay, so it compiles where
+	// deleting the whole `if` leaves them unused; the body is unreachable.
+	cs, ce := fset.Position(ifs.Cond.Pos()).Offset, fset.Position(ifs.Cond.End()).Offset
+	altFrom, _ := unique(string(src), cs, ce)
+	altTo := altFrom[:len(altFrom)-(ce-cs)] + "false && (" + string(src[cs:ce]) + ")"
+	// Deleting an if that has an Init clause also deletes a statement that may
+	// have effects, and deleting one with an Else deletes the other arm, so in
+	// both cases it is not "the guard removed" and only false && (C) is
+	// faithful. For a plain `if` deletion stays the primary mutation and this is
+	// the fallback for when it does not compile.
+	//
+	// ⛔ `chained` is the third case and it is NOT implied by the other two: the
+	// LAST link of an `else if` chain has neither an Init nor an Else of its own,
+	// and deleting its bytes leaves a dangling `} else` that does not compile.
+	// Its own test asserted this before the code did — the guard is the else's
+	// body, and what disqualifies deletion is being somebody's else, not having
+	// one.
+	if ifs.Init != nil || ifs.Else != nil || chained {
+		g.from, g.to = altFrom, altTo
+	} else {
+		g.altFrom, g.altTo = altFrom, altTo
+	}
+	return []guard{g}
 }
 
 // keepOnly narrows a collection to the named refusals, and refuses a name that
