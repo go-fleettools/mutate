@@ -72,6 +72,16 @@ func TestClassifyOnRealGoTestOutput(t *testing.T) {
 		{"review3", "./framepanic", all, caughtByPanic, "a panic value that prints like an assertion line"},
 		{"review3", "./stackdump", streamed, caught, "a PASSING test printed panic: and a stack; the other test fails with no message"},
 		{"review3", "./stackdump", all[:1], caughtByPanic, "plain output cannot tell whose stack dump it is: a false alarm"},
+		// review5: #28. The word is on the failing test's own ASSERTION line.
+		// ⛔ Caught in EVERY mode, plain included, which the two `stackdump` rows
+		// above are not: there the word is printed by a test that PASSED, so plain
+		// output cannot say whose stack it is and the false alarm is the safe
+		// answer. Here the line's own position prefix says the testing package
+		// printed it, so nothing is ambiguous.
+		// ⭐ `framepanic` above is the control on the other side: its panic VALUE
+		// contains an assertion-looking line, but the `panic:` is at column 0 on
+		// the line before, so it is still a panic and still resolves to PANIC.
+		{"review5", "./saidpanic", all, caught, "a test fails by assertion whose MESSAGE contains panic:, and another test panics"},
 	} {
 		for _, flags := range c.modes {
 			t.Run(c.fixtures+" "+c.pkg+" "+strings.Join(flags, " "), func(t *testing.T) {

@@ -262,6 +262,21 @@ hand:
   and then an index panic is the commonest test there is. A panic value that
   prints like an assertion line is not one either. What a test that **passed**
   logged (`go test -v` prints it) does not count.
+- **⛔ An assertion line is never the START of a panic**, whatever its message
+  says. The runtime prints `panic: …` at **column 0**; `t.Error` and `t.Fatal`
+  print an *indented* source position, so the line's own prefix states who printed
+  it and the "ambiguity resolves to PANIC" rule has no ambiguity to resolve. This
+  was a defect, not a refinement: a decline test that reports a recovered crash —
+  `t.Errorf("empty: %v, want …", err)` where `err` wraps `panic: runtime error:
+  …`, which is the ordinary shape of a test written to hold a nil check — tainted
+  *its own* test, its assertion lines were discarded, and a guard held **by an
+  assertion** was certified `caught by PANIC`. Measured on `go-pdfkit/reader`
+  `signature.go:69` under v0.11.0: rewording that helper from `panic: %v` to
+  `crashed (recovered): %v`, with no change to what the test asserts, turned the
+  same sweep into `caught`. ⭐ A verdict that moves with the wording of a message
+  is not a measurement. The control is `review3/framepanic`, whose panic *value*
+  prints an assertion-looking line: its `panic:` is at column 0 on the line
+  before, so it is still a panic.
 - **A panic** is a line holding `panic:` followed, at any distance, by the
   runtime's `goroutine N [state]:` header; a message of twenty lines, or a 100 KB
   line that test2json delivers in fragments (joined per test before matching), is
