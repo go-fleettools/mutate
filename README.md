@@ -305,6 +305,19 @@ hand:
   a `--- FAIL` line of its own, and that did not panic. A test that is merely not
   known to have passed may be one still running when the panic ended the binary,
   logging progress, and would have passed: its `t.Log` is not an assertion.
+- **⛔ A `--- ` line with NO NAME is not a verdict**, and reading one as a verdict
+  made a real panic read as `caught` — a guard nothing holds, reported as held.
+  `--- Expected` is what every failed testify `assert.Equal` prints (testify sets
+  difflib's `FromFile` to `"Expected"`, `assert/assertions.go:1965` at v1.12.1;
+  difflib writes it as `--- %s`, `difflib.go:589`), and it carries no colon, so
+  the name was taken from the whole line: a test called `---`, recorded as having
+  **passed**, under which every later line — the panic included — was then filed.
+  A verdict truncated to `--- FAIL:` did the same with the *empty* name, which is
+  the key that decides whether a panic belonging to no test killed the package.
+  Both now require a name, and a nameless `--- ` line leaves the current test
+  unchanged: it is something a test *printed*. Found by
+  `FuzzReadersKeepAVerdictAboutATest`; measured in `panic_test.go`, where the
+  whole suite was green on the old code for both inputs.
 
 #### Known false alarms (safe direction)
 
@@ -654,6 +667,28 @@ Three operating systems, because this tool edits files, spawns processes
 and traps signals — and the first version of one test shelled out to a
 `.sh`, which Windows cannot execute, so the command failed to *start* and
 that read as the command failing.
+
+And the classifier is **fuzzed**, because it is a parser of two grammars it
+does not control — the plain output of `go test`, and the test2json event
+stream — and every defect it had ever had was found by a hand-built fixture,
+which is to say by *imagining* the input:
+
+```
+go test -run xxx -fuzz FuzzClassify ./mutsweep/
+go test -run xxx -fuzz FuzzReadersKeepAVerdictAboutATest ./mutsweep/
+```
+
+They assert what must hold for **every** input, never the verdict of any one
+of them — a fuzzer has no oracle for "is this red a panic", and writing one
+would mean reimplementing the rule beside itself, so the two would agree by
+construction and measure nothing. What they assert is that it answers at all,
+that the verdict is one of exactly the two values this stage decides, that a
+reading asked in JSON which fell back to text agrees with the plain reading,
+and that **no verdict is ever recorded about a test with no name**. The last
+of those found the `--- Expected` defect above in 15.56 s, where the unit
+suite and a selfcheck on three operating systems had not. Reduced crashers
+are committed under `mutsweep/testdata/fuzz/`, so they replay in plain
+`go test`.
 
 ## What it does not do
 

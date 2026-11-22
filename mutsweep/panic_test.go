@@ -292,3 +292,69 @@ func TestAMutateModeThatIsNeitherIsRefused(t *testing.T) {
 		t.Errorf("the refusal does not say where the command went: %q", errOut.String())
 	}
 }
+
+// ⛔ A UNIFIED-DIFF HEADER IS NOT A TEST VERDICT, and reading one as a verdict
+// suppressed a real panic.
+//
+// `--- Expected` is what every failed testify assert.Equal prints: testify sets
+// difflib's FromFile to "Expected" (assert/assertions.go:1965 at v1.12.1,
+// unchanged since v1.3.0) and difflib writes it as `--- %s` (difflib.go:589).
+// The PASS/SKIP arm of readText accepted any line beginning `--- ` and took the
+// name from after its colon -- of which there is none here, so it indexed from
+// -1+1 == 0 and read the whole line, making `---` the name of a test it then
+// recorded as having PASSED. Every later line was filed under that name, so the
+// `panic:` below was a panic of something that passed, skipped, and the sweep
+// answered `caught`: the guard looked held by an assertion when nothing holds it.
+//
+// Found by FuzzReadersKeepAVerdictAboutATest; this is the real-world shape of
+// what it reduced to `--- :`.
+func TestADiffHeaderIsNotATestVerdict(t *testing.T) {
+	out := []byte(`=== RUN   TestDecode
+--- FAIL: TestDecode (0.00s)
+    d_test.go:12:
+        	Error:      	Not equal:
+        	            	--- Expected
+        	            	+++ Actual
+        	            	@@ -1,2 +1,2 @@
+panic: send on closed channel
+
+goroutine 9 [running]:
+main.worker()
+	/x/w.go:17 +0x1c
+FAIL	x	0.2s
+FAIL
+`)
+	if v, _ := classify(out, false); v != caughtByPanic {
+		t.Errorf("a panic after a diff header read as %q, want %q: the header was taken for a verdict and the panic filed under something that passed", v, caughtByPanic)
+	}
+	if _, passed := readText(out); passed[testKey{"p0", "---"}] {
+		t.Errorf("`--- Expected` registered a test named `---` as having passed: %v", passed)
+	}
+}
+
+// ⛔ A verdict line truncated to `--- FAIL:` is not a PASS. The FAIL arm needs
+// the trailing space of "--- FAIL: ", so a line cut right after the colon fell
+// through to the PASS/SKIP arm, which recorded the EMPTY name as having passed --
+// and `panicked` asks passed[{pkg, ""}] to decide whether a panic belonging to no
+// test killed the package. Both halves therefore read false: a failing test
+// counted as passed, and the package-level panic that followed was suppressed.
+//
+// Output is truncated for ordinary reasons (a process killed mid-write, a long
+// line test2json delivers in fragments), and a test whose own job is to print go
+// test output -- this package's, cmd/declines' in go-fleettools/fleettools --
+// prints such a line on purpose.
+func TestATruncatedFailLineIsNotAPass(t *testing.T) {
+	out := []byte(`--- FAIL:
+panic: send on closed channel
+
+goroutine 42 [running]:
+FAIL	x	0.1s
+`)
+	if v, _ := classify(out, false); v != caughtByPanic {
+		t.Errorf("a package-level panic after a truncated FAIL line read as %q, want %q", v, caughtByPanic)
+	}
+	_, passed := readText(out)
+	if ok, reported := passed[testKey{"p0", ""}]; reported {
+		t.Errorf("a line with no test name was recorded as a verdict (passed=%v); nothing can be known about a test that was not named", ok)
+	}
+}
