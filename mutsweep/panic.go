@@ -280,13 +280,51 @@ func readText(out []byte) (lines []outLine, passed map[testKey]bool) {
 	for _, text := range strings.Split(string(out), "\n") {
 		trimmed := strings.TrimLeft(text, " \t")
 		switch {
+		// ⛔ A verdict line WITHOUT A NAME is not a verdict line, and reading one as
+		// such was a false certificate. `--- PASS:` or `--- FAIL:` with nothing
+		// after the colon gave `test = ""`, so `passed[{pkg, ""}]` was recorded —
+		// and `panicked` asks exactly that key before deciding that a `panic:` line
+		// belonging to no test killed the package. An entry reading true there
+		// SUPPRESSED a package-level panic (a `go test -timeout` expiry, a panic in
+		// a goroutine the code started) and the sweep answered `caught`.
+		//
+		// ⭐ It is reachable from the most ordinary output there is, not only from a
+		// fuzzer. Two shapes, both measured in panic_test.go:
+		//
+		//   - A UNIFIED-DIFF HEADER. `--- Expected` is what every failed testify
+		//     assert.Equal prints: testify sets difflib's FromFile to "Expected"
+		//     (assert/assertions.go:1965 at v1.12.1, unchanged since v1.3.0) and
+		//     difflib writes it as `--- %s` (difflib.go:589). It carries no colon,
+		//     so the arm below indexed from -1+1 == 0, read the whole line, and
+		//     registered a test NAMED `---` as having passed. Every later line was
+		//     filed under that name, so a real panic became the output of something
+		//     that passed and the verdict was `caught`.
+		//   - A TRUNCATED VERDICT. The FAIL arm needs the trailing space of
+		//     `"--- FAIL: "`, so a line cut to `--- FAIL:` falls through to the arm
+		//     below and marks a FAILING test as having PASSED. Output is truncated
+		//     for ordinary reasons: a process killed mid-write, a long line
+		//     test2json delivers in fragments.
+		//
+		// Found by FuzzReadersKeepAVerdictAboutATest, which reduced it to `--- :`;
+		// that input is committed under testdata/fuzz/.
+		//
+		// `test` is deliberately LEFT UNCHANGED rather than cleared: a `--- ` line
+		// with no name is something a test PRINTED, so the lines after it still
+		// belong to that test. Which is also the safe direction — the lines of a
+		// test that panicked are never read as assertions.
 		case strings.HasPrefix(trimmed, "--- FAIL: "):
-			test = firstField(strings.TrimPrefix(trimmed, "--- FAIL: "))
-			passed[testKey{pkg, test}] = false
+			if name := firstField(strings.TrimPrefix(trimmed, "--- FAIL: ")); name != "" {
+				test = name
+				passed[testKey{pkg, test}] = false
+			}
 		case strings.HasPrefix(trimmed, "--- "):
 			// PASS and SKIP: the lines around it belong to a test that did not fail.
-			test = firstField(trimmed[strings.IndexByte(trimmed, ':')+1:])
-			passed[testKey{pkg, test}] = true
+			if c := strings.IndexByte(trimmed, ':'); c >= 0 {
+				if name := firstField(trimmed[c+1:]); name != "" {
+					test = name
+					passed[testKey{pkg, test}] = true
+				}
+			}
 		case strings.HasPrefix(text, "=== "):
 			f := strings.Fields(text)
 			if len(f) >= 3 {
