@@ -287,6 +287,24 @@ func TestPathFromFallsBackToTheJoinedPathWhenNoRelativeOneExists(t *testing.T) {
 
 // ---- main.go -------------------------------------------------------------
 
+// record.go: the real creator reports a directory it cannot create in, and
+// hands back NO file, not a nil *os.File inside a non-nil interface.
+func TestCreatingARecordTempInAMissingDirectoryIsAnError(t *testing.T) {
+	f, err := createRecordTemp(filepath.Join(t.TempDir(), "absent"), ".record-*")
+	if err == nil {
+		t.Fatal("no error for a directory that does not exist")
+	}
+	if f != nil {
+		t.Errorf("returned %v alongside the error, want a nil interface", f)
+	}
+	ok, err := createRecordTemp(t.TempDir(), ".record-*")
+	if err != nil || ok == nil {
+		t.Fatalf("in a real directory: %v, %v", ok, err)
+	}
+	ok.Close()
+	os.Remove(ok.Name())
+}
+
 // keepActive makes drive leave MUTSWEEP_ACTIVE as the test set it.
 var keepActive bool
 
