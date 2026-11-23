@@ -184,9 +184,43 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if cfg.tally {
-		return tally(guards, cfg.dir, cfg.noun(), stdout)
+		code := tally(guards, cfg.dir, cfg.noun(), stdout)
+		if !cfg.allSites() {
+			// What this walk leaves out, so a claim of covering every guard can
+			// be checked against it (#21).
+			all := cfg
+			all.sites = sitesAll
+			more, _, _ := collect(all) // the walk just succeeded on the same files
+			if s := skipped(more); s != "" {
+				fmt.Fprintln(stdout, s)
+			}
+		}
+		return code
 	}
 	return sweep(cfg, guards, cmd, stdout, stderr)
+}
+
+// skipped counts, by kind, the sites only -sites all visits.
+func skipped(all []guard) string {
+	count := map[string]int{}
+	for _, g := range all {
+		if g.kind != "" {
+			count[g.kind]++
+		}
+	}
+	var kinds []string
+	for k := range count {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	parts := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		parts = append(parts, fmt.Sprintf("%d [%s]", count[k], k))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "not swept (add -sites all): " + strings.Join(parts, ", ")
 }
 
 // tally prints how many refusals each file holds, and stops.

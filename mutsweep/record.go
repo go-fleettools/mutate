@@ -250,7 +250,10 @@ func writeRecords(cfg config, results []result, stderr io.Writer) error {
 		// which leaves the record alone.
 		stale := false
 		if ok && len(rec.Lines) == 0 {
-			gs, _ := guardsIn(filepath.Dir(p), filepath.Base(p), src, false)
+			// Counted with the sites THIS sweep visits: -sites all finds more
+			// than a default walk, and a record that counts fewer is stale in
+			// the same way (#21).
+			gs, _ := guardsInSites(filepath.Dir(p), filepath.Base(p), src, false, cfg.allSites())
 			if rec.Guards < len(gs) {
 				rec.Guards, stale = len(gs), true
 			}
