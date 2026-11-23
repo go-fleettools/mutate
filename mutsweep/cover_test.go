@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -234,6 +235,54 @@ func TestParseRefusesWhatItCannotRead(t *testing.T) {
 	}
 }
 
+// guards.go:109. An unknown flag must stop the parse THERE: read on, the
+// arguments after it are a perfectly good tally, and a run that exits 0 after
+// being told something it did not understand is worse than one that exits 2.
+func TestAnUnknownFlagStopsTheParseEvenWhenTheRestIsValid(t *testing.T) {
+	var errOut bytes.Buffer
+	if _, _, code := parse([]string{"-no-such-flag", "-tally"}, &errOut); code != 2 {
+		t.Errorf("exit %d, want 2: the unknown flag was read past", code)
+	}
+}
+
+// sweep.go:430. A command that cannot START is reported as that, not as the
+// "not started" a Wait on it would say.
+func TestACommandThatCannotStartSaysSo(t *testing.T) {
+	c := exec.Command(filepath.Join(t.TempDir(), "no-such-program"))
+	_, err := runBounded(context.Background(), c)
+	if err == nil || strings.Contains(err.Error(), "not started") {
+		t.Errorf("error = %v, want the start failure", err)
+	}
+}
+
+// record.go:123. A record that is not JSON is reported as unreadable, naming
+// its key; it must not fall through to the key comparison below, which would
+// say something else (that it holds a sweep of nothing).
+func TestARecordThatIsNotJSONIsReportedAsUnreadable(t *testing.T) {
+	store := t.TempDir()
+	t.Setenv(recordsEnv, store)
+	write(t, store, "k.json", "{ not json")
+	_, _, err := lookupRecord("k")
+	if err == nil || !strings.Contains(err.Error(), "record k:") || strings.Contains(err.Error(), "holds a sweep") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+// hook.go:396. The NEAREST go.mod wins: a module below the repository root is
+// the module root, not the repository root.
+func TestTheNearestGoModIsTheModuleRoot(t *testing.T) {
+	root := t.TempDir()
+	mod := filepath.Join(root, "a")
+	deep := filepath.Join(mod, "b", "c")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, mod, "go.mod", "module x\n\ngo 1.27\n")
+	if got := moduleRoot(deep, root); got != mod {
+		t.Errorf("moduleRoot = %q, want %q", got, mod)
+	}
+}
+
 // guards.go: every way collect can fail on what it is pointed at.
 func TestCollectSaysWhatItCouldNotRead(t *testing.T) {
 	dir := t.TempDir()
@@ -431,7 +480,8 @@ func TestRunSaysWhatTheBuildExcluded(t *testing.T) {
 func TestRunSaysWhyItCouldNotCollect(t *testing.T) {
 	var out, errOut bytes.Buffer
 	code := run([]string{"-tally", "-dir", filepath.Join(t.TempDir(), "absent")}, &out, &errOut)
-	if code != 2 || !strings.Contains(errOut.String(), "mutsweep:") {
+	// The cause is named: a run that found nothing to sweep says another thing.
+	if code != 2 || !strings.Contains(errOut.String(), "mutsweep:") || !strings.Contains(errOut.String(), "absent") {
 		t.Errorf("exit %d: %q", code, errOut.String())
 	}
 }

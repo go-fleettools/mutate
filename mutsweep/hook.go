@@ -469,10 +469,9 @@ func hookMain(in io.Reader, stdout, stderr io.Writer) int {
 	if p.ToolName != "" && p.ToolName != "Bash" {
 		return 0
 	}
+	// No push in the command: the loop below has nothing to judge, and the
+	// answer is the plain 0 at the end.
 	pushes := pushesIn(p.ToolInput.Command, p.Cwd)
-	if len(pushes) == 0 {
-		return 0
-	}
 	var refusal, waived, said []string
 	for _, ps := range pushes {
 		if ps.moved != "" {
