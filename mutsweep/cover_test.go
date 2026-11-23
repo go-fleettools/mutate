@@ -287,10 +287,19 @@ func TestPathFromFallsBackToTheJoinedPathWhenNoRelativeOneExists(t *testing.T) {
 
 // ---- main.go -------------------------------------------------------------
 
+// keepActive makes drive leave MUTSWEEP_ACTIVE as the test set it.
+var keepActive bool
+
 // drive runs main() with the given arguments and stdin, and returns what it
 // asked the process to exit with and what it wrote to stderr.
 func drive(t *testing.T, stdin string, args ...string) (exits []int, stderr string) {
 	t.Helper()
+	// These tests run main() in this process, and the suite itself may be the
+	// command of a sweep, which sets MUTSWEEP_ACTIVE: unset unless the test is
+	// about exactly that.
+	if !keepActive {
+		t.Setenv(active, "")
+	}
 	dir := t.TempDir()
 	in, err := os.Create(filepath.Join(dir, "in"))
 	if err != nil {
@@ -364,6 +373,8 @@ func TestMainReadsHookOnlyAsTheWholeCommandLine(t *testing.T) {
 // main.go: a sweep inside a sweep is refused, once, with the reason.
 func TestMainRefusesASweepInsideASweep(t *testing.T) {
 	t.Setenv(active, "1")
+	keepActive = true
+	t.Cleanup(func() { keepActive = false })
 	exits, errText := drive(t, "", "-tally", "-dir", t.TempDir())
 	if !equalInts(exits, []int{2}) || !strings.Contains(errText, "inside another sweep") {
 		t.Errorf("exits %v, stderr %q", exits, errText)
