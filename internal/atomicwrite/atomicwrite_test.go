@@ -372,6 +372,26 @@ func TestEachStepThatCannotCompleteLeavesTheOriginalWhole(t *testing.T) {
 	}
 }
 
+// The stand-in for a file that could not be created answers EVERY call with the
+// create error, so a guard that is skipped meets the same cause later on
+// instead of a nil dereference or a silent success.
+func TestTheStandInAnswersEveryCallWithTheCreateError(t *testing.T) {
+	boom := errors.New("no room")
+	u := unusable{err: boom}
+	if n, err := u.Write([]byte("x")); n != 0 || !errors.Is(err, boom) {
+		t.Errorf("Write = %d, %v", n, err)
+	}
+	if err := u.Sync(); !errors.Is(err, boom) {
+		t.Errorf("Sync = %v", err)
+	}
+	if err := u.Close(); !errors.Is(err, boom) {
+		t.Errorf("Close = %v", err)
+	}
+	if got := u.Name(); got != "" {
+		t.Errorf("Name = %q", got)
+	}
+}
+
 // The rename is the one step a real filesystem refuses on demand: a directory
 // cannot be replaced by a file. No seam, therefore — the guard is held by the
 // kernel, which is a better witness than an injected error.

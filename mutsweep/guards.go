@@ -215,6 +215,10 @@ func excludedError(dir string, excluded []string) error {
 		build.Default.GOOS, build.Default.GOARCH, strings.Join(excluded, ", "), dir, strings.Join(excluded, ","))
 }
 
+// readSource is os.ReadFile behind a name: a file that passes the build check
+// and then cannot be read is a race, and no test can arrange one.
+var readSource = os.ReadFile
+
 func collect(cfg config) ([]guard, []string, error) {
 	paths := cfg.files
 	if len(paths) == 0 && len(cfg.only) > 0 {
@@ -260,7 +264,7 @@ func collect(cfg config) ([]guard, []string, error) {
 	for _, p := range paths {
 		// Relative to -dir, because the command and mutate both run THERE:
 		// a path that is right for this process is wrong for them.
-		src, err := os.ReadFile(filepath.Join(cfg.dir, p))
+		src, err := readSource(filepath.Join(cfg.dir, p))
 		if err != nil {
 			return nil, nil, err
 		}
