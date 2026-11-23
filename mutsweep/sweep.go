@@ -409,14 +409,14 @@ func trim(s string, n int) string {
 	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	var count int
-	for i := range s {
-		if count == n-1 {
-			return s[:i] + "…"
-		}
-		count++
+	// Past the first n-1 runes. A byte that is not valid UTF-8 counts as one
+	// rune of width 1, which is what ranging over the string does too.
+	cut := 0
+	for range n - 1 {
+		_, width := utf8.DecodeRuneInString(s[cut:])
+		cut += width
 	}
-	return s
+	return s[:cut] + "…"
 }
 
 // runBounded runs the command and, if the context ends first, kills what it
