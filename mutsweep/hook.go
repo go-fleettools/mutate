@@ -204,7 +204,11 @@ func resolveDir(dir, arg string) string {
 
 // gitOut runs git in dir and returns its standard output UNMODIFIED: the blob
 // `git show` prints is hashed, and a trimmed blob is a different file.
-func gitOut(dir string, args ...string) ([]byte, error) {
+//
+// It is a variable so a test can make ONE git step fail: the diff that follows a
+// merge-base that worked, or a file the diff just listed that HEAD does not
+// hold, cannot be arranged in a real repository.
+var gitOut = func(dir string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
@@ -398,6 +402,10 @@ func moduleRoot(dir, root string) string {
 	}
 }
 
+// relPath is filepath.Rel behind a name: on Windows it fails across volumes, and
+// no path a POSIX test can build makes it fail here.
+var relPath = filepath.Rel
+
 // remedy is the command that clears a refusal, per package directory.
 func remedy(v verdictOf) []string {
 	byDir := map[string][]string{}
@@ -414,7 +422,7 @@ func remedy(v verdictOf) []string {
 	for _, d := range dirs {
 		abs := filepath.Join(v.root, d)
 		mod := moduleRoot(abs, v.root)
-		rel, err := filepath.Rel(mod, abs)
+		rel, err := relPath(mod, abs)
 		if err != nil {
 			rel = abs
 		}
@@ -461,10 +469,9 @@ func hookMain(in io.Reader, stdout, stderr io.Writer) int {
 	if p.ToolName != "" && p.ToolName != "Bash" {
 		return 0
 	}
+	// No push in the command: the loop below has nothing to judge, and the
+	// answer is the plain 0 at the end.
 	pushes := pushesIn(p.ToolInput.Command, p.Cwd)
-	if len(pushes) == 0 {
-		return 0
-	}
 	var refusal, waived, said []string
 	for _, ps := range pushes {
 		if ps.moved != "" {

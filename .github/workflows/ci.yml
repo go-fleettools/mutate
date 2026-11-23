@@ -105,6 +105,27 @@ jobs:
           test -s /tmp/vuln.json || { echo "::error::govulncheck wrote nothing at all"; exit 1; }
           "$BIN/vulngate" -go "$(go env GOVERSION)" /tmp/vuln.json
 
+  # ⛔ 100 % OF THE STATEMENTS mutsweep and the in-module packages it imports
+  # (internal/atomicwrite). ONE `go test` invocation over both packages, so
+  # the profile is merged by the toolchain: two separate profiles concatenated
+  # report a block covered by the other package's tests as uncovered.
+  # `covblocks --max 0` lists every uncovered block by file:line and fails.
+  coverage:
+    name: mutsweep statement coverage is 100 %
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: coverage
+        run: |
+          set -eu
+          go install github.com/go-fleettools/fleettools/cmd/covblocks@v0.161.0
+          go test -count=1 -coverpkg=./mutsweep,./internal/atomicwrite -coverprofile=cover.out ./mutsweep ./internal/atomicwrite
+          "$(go env GOPATH)/bin/covblocks" --max 0 cover.out
+
   # The tool's whole claim is that it can tell a caught mutation from a
   # surviving one. Asserting that against ITSELF, end to end through the
   # built binary, is cheap and is the only check that exercises the

@@ -136,20 +136,27 @@ import (
 // about a directory. This refuses the second sweep whatever it was asked to do.
 const active = "MUTSWEEP_ACTIVE"
 
+// osExit is os.Exit behind a name, so a test can drive main() itself: main's own
+// three exits were held by nothing, and a survivor there is a gate that can be
+// deleted without a test going red.
+var osExit = os.Exit
+
 func main() {
 	// The push gate first (hook.go). It runs no command and starts no sweep, so
 	// the recursion guard below has nothing to protect there -- and a stray
 	// MUTSWEEP_ACTIVE in a session's environment must not refuse every push with
 	// a message about sweeps inside sweeps.
 	if len(os.Args) == 2 && os.Args[1] == "-hook" {
-		os.Exit(hookMain(os.Stdin, os.Stdout, os.Stderr))
+		osExit(hookMain(os.Stdin, os.Stdout, os.Stderr))
+		return
 	}
 	if os.Getenv(active) != "" {
 		fmt.Fprintln(os.Stderr, "mutsweep: refusing to run inside another sweep — "+
 			"the command a sweep runs must not reach this tool, or each mutant starts a sweep of its own")
-		os.Exit(2)
+		osExit(2)
+		return
 	}
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	osExit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 func run(argv []string, stdout, stderr io.Writer) int {

@@ -132,6 +132,24 @@ func lookupRecord(key string) (record, bool, error) {
 	return r, true, nil
 }
 
+// recordTemp is the part of *os.File that storeRecord uses, and createRecordTemp
+// the one place it is made: a write or a close that fails on a file this very
+// process just created cannot be arranged on a real filesystem, and the two
+// error paths below were held by nothing.
+type recordTemp interface {
+	Write(p []byte) (int, error)
+	Close() error
+	Name() string
+}
+
+var createRecordTemp = func(dir, pattern string) (recordTemp, error) {
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
 // storeRecord writes a record atomically: about twenty-five sessions share this
 // machine, and a half-written record read by a gate would be read as corrupt.
 func storeRecord(r record) error {
@@ -146,7 +164,7 @@ func storeRecord(r record) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".record-*")
+	tmp, err := createRecordTemp(dir, ".record-*")
 	if err != nil {
 		return err
 	}
