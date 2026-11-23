@@ -45,6 +45,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/go-fleettools/mutate/internal/atomicwrite"
@@ -151,6 +152,17 @@ type mutation struct {
 	original             []byte
 	applied              bool
 	stderr               io.Writer
+	// ⛔ ONE LOCK ACROSS EVERY WRITE. The signal handler restores on its own
+	// goroutine and then exits; the main goroutine restores when the command
+	// ends -- and a sweep's timeout kills the whole process group, so BOTH run at
+	// once. Without the lock the loser saw applied==false, returned at once and
+	// os.Exit(130) ended the process while the winner was between its temporary
+	// file and its rename: the source stayed MUTATED and a
+	// .name.atomicwrite-* file was left beside it (measured on a HUNG mutant,
+	// 2026-11-23). Held through apply too, so a signal that lands mid-apply
+	// waits for applied to be true instead of skipping the restore.
+	mu    sync.Mutex
+	write func(path string, data []byte, perm fs.FileMode) error
 }
 
 func newMutation(path, from, to, name string, stderr io.Writer) (*mutation, error) {
@@ -172,7 +184,7 @@ func newMutation(path, from, to, name string, stderr io.Writer) (*mutation, erro
 		// one being described, and the report would name the small one.
 		return nil, fmt.Errorf("%s: the text to replace appears %d times — make it unique", path, n)
 	}
-	return &mutation{path: path, from: from, to: to, name: name, original: b, stderr: stderr}, nil
+	return &mutation{path: path, from: from, to: to, name: name, original: b, stderr: stderr, write: atomicwrite.Write}, nil
 }
 
 func (m *mutation) label() string {
@@ -188,7 +200,9 @@ func (m *mutation) apply() error {
 	// that window leaves the file EMPTY. Measured 2026-11-21 on
 	// go-fleettools/prwait — a killed sweep left a 434-line source file at
 	// zero bytes. See internal/atomicwrite.
-	if err := atomicwrite.Write(m.path, []byte(out), sourcePerm); err != nil {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.write(m.path, []byte(out), sourcePerm); err != nil {
 		return err
 	}
 	m.applied = true
@@ -196,11 +210,13 @@ func (m *mutation) apply() error {
 }
 
 func (m *mutation) restore() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.applied {
 		return
 	}
 	m.applied = false
-	if err := atomicwrite.Write(m.path, m.original, sourcePerm); err != nil {
+	if err := m.write(m.path, m.original, sourcePerm); err != nil {
 		// Said as loudly as possible: the tree now holds a deliberate
 		// defect and the next commit would carry it.
 		fmt.Fprintf(m.stderr, "mutate: COULD NOT RESTORE %s: %v\n", m.path, err)

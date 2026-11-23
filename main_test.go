@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/go-fleettools/mutate/internal/atomicwrite"
 )
 
 // A tool that proves tests can fail has to be able to fail itself.
@@ -45,6 +49,43 @@ func TestARestoreThatCannotBeWrittenIsSaidOutLoud(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), path) {
 		t.Errorf("it said %q, which does not name the file left mutated", errb.String())
+	}
+}
+
+// ⛔⛔ A SECOND RESTORE MUST WAIT FOR THE FIRST, not return because it is
+// already under way. On a HUNG mutant the timeout signals the whole group: the
+// handler's restore and the main goroutine's restore run together, the loser
+// returned at once and os.Exit(130) ended the process between the temporary
+// file and the rename -- source left mutated, .g.go.atomicwrite-* left behind.
+func TestASecondRestoreWaitsForTheFirstToFinish(t *testing.T) {
+	path := write(t, t.TempDir(), "g.go", "keep me\n")
+	m, err := newMutation(path, "keep", "drop", "", &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.apply(); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	m.write = func(p string, d []byte, perm fs.FileMode) error {
+		close(entered)
+		<-release
+		return atomicwrite.Write(p, d, perm)
+	}
+	first, second := make(chan struct{}), make(chan struct{})
+	go func() { m.restore(); close(first) }()
+	<-entered
+	go func() { m.restore(); close(second) }()
+	select {
+	case <-second:
+		t.Fatal("the second restore returned while the first was still writing")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	<-first
+	<-second
+	if b, _ := os.ReadFile(path); string(b) != "keep me\n" {
+		t.Errorf("the file holds %q, not its original bytes", b)
 	}
 }
 
