@@ -79,3 +79,18 @@ func TestWhetherTheCompilerCouldHaveWrittenALine(t *testing.T) {
 		}
 	}
 }
+
+// A caught mutation whose package prints its own --help: cobra's prose lands
+// on the test's stdout UNINDENTED and contains "cannot use" (modfloor, 2026-11-15).
+const caughtWhileTheCommandPrintsItsHelp = `A campaign cannot use that status. 262 of this fleet's published modules declare
+--- FAIL: TestMainPrintsTheNoteItsLogicProduces (0.00s)
+FAIL
+FAIL	example/x	0.2s
+`
+
+func TestAPhraseTheCommandPrintsIsNotABuildFailure(t *testing.T) {
+	if looksLikeBuildFailure(caughtWhileTheCommandPrintsItsHelp) {
+		t.Error("prose the command under test printed (unindented, with \"cannot use\") " +
+			"was read as a build failure")
+	}
+}

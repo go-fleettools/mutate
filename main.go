@@ -43,6 +43,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -244,6 +245,9 @@ func looksLikeBuildFailure(out string) bool {
 		if !compilerCouldHaveWritten(line) {
 			continue
 		}
+		if !isDiagnosticLine(line) {
+			continue
+		}
 		for _, s := range compilerSays {
 			if strings.Contains(line, s) {
 				return true
@@ -251,6 +255,19 @@ func looksLikeBuildFailure(out string) bool {
 		}
 	}
 	return false
+}
+
+// diagnosticShape is how the toolchain starts a diagnostic: file.go:LINE[:COL]:.
+var diagnosticShape = regexp.MustCompile(`^[^\s:]+\.go:\d+(:\d+)?: `)
+
+// isDiagnosticLine says whether an unindented line is shaped like something
+// the toolchain writes, rather than prose the command under test PRINTED (a
+// --help text is unindented too, because go test forwards stdout verbatim).
+// A diagnostic names a file and a line; the one phrase without a position is
+// the package loader's "build constraints exclude all Go files".
+func isDiagnosticLine(line string) bool {
+	return diagnosticShape.MatchString(line) ||
+		strings.Contains(line, "build constraints exclude")
 }
 
 // compilerCouldHaveWritten says whether a line is the toolchain speaking
