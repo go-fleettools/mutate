@@ -241,7 +241,21 @@ func writeRecords(cfg config, results []result, stderr io.Writer) error {
 		for _, r := range rs {
 			rerun[r.line] = r
 		}
-		if !ok || len(rec.Lines) > 0 {
+		// ⛔ A FULL record that counts fewer refusals than the file holds now was
+		// made by an older mutsweep (#30), and no -only run could ever raise its
+		// Guards. Which refusals it asked about is not recorded, so it becomes a
+		// partial record of exactly the lines asked now (the verdicts it holds
+		// for the others are kept below); the gate then answers by membership
+		// and its own advice is no longer a loop. A walk that fails counts 0,
+		// which leaves the record alone.
+		stale := false
+		if ok && len(rec.Lines) == 0 {
+			gs, _ := guardsIn(filepath.Dir(p), filepath.Base(p), src, false)
+			if rec.Guards < len(gs) {
+				rec.Guards, stale = len(gs), true
+			}
+		}
+		if !ok || stale || len(rec.Lines) > 0 {
 			// A partial record learns which lines it now covers; a full one
 			// already covers them all.
 			// Membership, not covers(): a record just started has no Lines

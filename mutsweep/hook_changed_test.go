@@ -126,3 +126,32 @@ func TestNewSideReadsTheHeadHalfOfAHunkHeader(t *testing.T) {
 		}
 	}
 }
+
+// #30: a FULL record made by an older mutsweep counts fewer refusals than the
+// file holds, so the gate refuses every changed line; the -only run it asks for
+// must repair that record rather than leave its Guards below the walk's count.
+func TestOnlyRepairsAFullRecordAnOlderMutsweepMade(t *testing.T) {
+	t.Setenv(recordsEnv, t.TempDir())
+	work := newPushRepo(t)
+	bin := buildMutate(t)
+	both := strings.Replace(guardedTwo, "n < 0", "n < 1", 1)
+	if err := os.WriteFile(filepath.Join(work, "g.go"), []byte(both), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, work, "commit", "-am", "move the first bound too")
+	// What the older mutsweep filed: a full record of ONE guard, for two.
+	if err := storeRecord(record{SHA256: contentKey([]byte(both)), File: "g.go", Guards: 1}); err != nil {
+		t.Fatal(err)
+	}
+	code, _, why := hookOn(t, work, "gitpush")
+	if code != 2 || !strings.Contains(why, "g.go:7,g.go:10") {
+		t.Fatalf("the stale record vouched for the push (exit %d):\n%s", code, why)
+	}
+	var out, errOut bytes.Buffer
+	if c := run([]string{"-dir", work, "-only", "g.go:7,g.go:10", "-mutate-bin", bin, "--", "go", "test", "./..."}, &out, &errOut); c != 0 {
+		t.Fatalf("-only exited %d:\n%s\n%s", c, out.String(), errOut.String())
+	}
+	if code, msg, why := hookOn(t, work, "gitpush"); code != 0 || msg != "" || why != "" {
+		t.Fatalf("the advice the gate gave did not clear it (exit %d): %q %q", code, msg, why)
+	}
+}
