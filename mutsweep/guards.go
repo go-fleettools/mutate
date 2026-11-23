@@ -26,14 +26,21 @@ type config struct {
 	mutate  string
 	tally   bool   // count per file and stop, running nothing
 	mode    string // what to do to each refusal: modeDelete (the default) or modeBoundary
+	sites   string // which sites to visit: sitesRefusals (the default) or sitesAll
 }
 
 const (
 	modeDelete   = "delete"
 	modeBoundary = "boundary"
+
+	sitesRefusals = "refusals"
+	sitesAll      = "all"
 )
 
 func (c config) boundary() bool { return c.mode == modeBoundary }
+
+// allSites is whether -sites all was asked for (#21).
+func (c config) allSites() bool { return c.sites == sitesAll }
 
 // noun is what a sweep counts: a refusal is deleted, a comparison is moved.
 func (c config) noun() string {
@@ -79,6 +86,9 @@ type guard struct {
 	// does not compile (a variable used only in its condition is left unused):
 	// the condition replaced by `false && (C)`. Empty when from/to already is it.
 	altFrom, altTo string
+	// kind is "" for the refusals every sweep visits, and for the sites of
+	// -sites all (#21) one of loop, branch, return=true, return=false.
+	kind string
 }
 
 func parse(argv []string, stderr io.Writer) (config, []string, int) {
@@ -103,10 +113,20 @@ func parse(argv []string, stderr io.Writer) (config, []string, int) {
 		"loop's, to the other side of its edge (< to <=, <= to <, > to >=, >= to >).\n"+
 		"Deleting a refusal is the wrong mutation for a range guard, whose defects are\n"+
 		"off-by-one ones")
+	fs.StringVar(&cfg.sites, "sites", sitesRefusals, "which sites to visit: `refusals` (the default: an if whose body ends in a\n"+
+		"return, with or without an init clause or an else), or `all`, which adds\n"+
+		"[loop] an if whose body ends in continue or break, [branch] every other if\n"+
+		"(its condition becomes false && (C)), and [return=true] / [return=false] a\n"+
+		"boolean return expression. Off by default because more sites change the count\n"+
+		"a record is judged against; -tally lists what a default sweep leaves out")
 	fs.BoolVar(&cfg.tally, "tally", false, "count the refusals per FILE and stop, running nothing.\n"+
 		"For planning a campaign in chunks, and for checking afterwards that the chunks\n"+
 		"covered the package: no command is needed with it")
 	if err := fs.Parse(argv); err != nil {
+		return cfg, nil, 2
+	}
+	if cfg.sites != sitesRefusals && cfg.sites != sitesAll {
+		fmt.Fprintf(stderr, "mutsweep: -sites %q: it is %s or %s\n", cfg.sites, sitesRefusals, sitesAll)
 		return cfg, nil, 2
 	}
 	if cfg.mode != modeDelete && cfg.mode != modeBoundary {
@@ -268,7 +288,7 @@ func collect(cfg config) ([]guard, []string, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		found, err := guardsIn(cfg.dir, p, src, cfg.boundary())
+		found, err := guardsInSites(cfg.dir, p, src, cfg.boundary(), cfg.allSites())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -276,6 +296,14 @@ func collect(cfg config) ([]guard, []string, error) {
 	}
 	if len(cfg.only) > 0 {
 		g, kErr := keepOnly(out, cfg.only)
+		if kErr != nil && !cfg.allSites() {
+			// ⛔ "Not there" was FALSE for a line the file holds and this mode does
+			// not visit (#21): the reader was sent to look for a typo. Say which.
+			all := cfg
+			all.sites, all.only = sitesAll, nil
+			more, _, _ := collect(all) // the walk just succeeded on the same files
+			kErr = fmt.Errorf("%w; %s", kErr, elsewhere(more, cfg.only))
+		}
 		return g, excluded, kErr
 	}
 	return out, excluded, nil
@@ -291,6 +319,34 @@ func collect(cfg config) ([]guard, []string, error) {
 // call it: a second copy written for the gate would be a second definition of
 // "a refusal", free to disagree with the one that was actually swept.
 func guardsIn(dir, p string, src []byte, boundary bool) ([]guard, error) {
+	return guardsInSites(dir, p, src, boundary, false)
+}
+
+// elsewhere names the -only targets that are sites of a shape the default walk
+// does not visit, so "not there" is never said of a line that is.
+func elsewhere(all []guard, want []target) string {
+	var held []string
+	for _, w := range want {
+		for _, g := range all {
+			if g.kind != "" && g.file == w.file && g.line == w.line {
+				held = append(held, fmt.Sprintf("%s is a %s site", w, g.kind))
+				break
+			}
+		}
+	}
+	if len(held) == 0 {
+		return "none of them is a site of any shape either"
+	}
+	return strings.Join(held, ", ") + ": mutsweep visits those only with -sites all"
+}
+
+// kindOf renders a guard's kind for the report: empty for the original refusals.
+func kindOf(kind, cond string) string { return "[" + kind + "] " + cond }
+
+// guardsInSites is guardsIn with the sites of #21 behind all: a refusal that
+// ends in continue or break ([loop]), every other if ([branch]) and a boolean
+// return expression ([return=true], [return=false]).
+func guardsInSites(dir, p string, src []byte, boundary, all bool) ([]guard, error) {
 	full := filepath.Join(dir, p)
 	var out []guard
 	fset := token.NewFileSet()
@@ -321,6 +377,10 @@ func guardsIn(dir, p string, src []byte, boundary bool) ([]guard, error) {
 			return true
 		}
 		for _, stmt := range list {
+			if ret, isRet := stmt.(*ast.ReturnStmt); isRet && all {
+				out = append(out, returnSites(dir, p, fset, string(src), ret, boundary)...)
+				continue
+			}
 			ifs, ok := stmt.(*ast.IfStmt)
 			if !ok {
 				continue
@@ -333,7 +393,7 @@ func guardsIn(dir, p string, src []byte, boundary bool) ([]guard, error) {
 			// that gets forgotten next.
 			chained := false
 			for cur := ifs; cur != nil; {
-				out = append(out, guardsOfIf(dir, p, fset, src, cur, boundary, chained)...)
+				out = append(out, guardsOfIf(dir, p, fset, src, cur, boundary, chained, all)...)
 				next, isChain := cur.Else.(*ast.IfStmt)
 				if !isChain {
 					break
@@ -370,7 +430,7 @@ func guardsIn(dir, p string, src []byte, boundary bool) ([]guard, error) {
 // for Init clauses — the condition becomes `false && (C)`, every arm stays
 // compilable, and the else arm runs unconditionally. So this needed no new
 // mutation, only the removal of a skip.
-func guardsOfIf(dir, p string, fset *token.FileSet, src []byte, ifs *ast.IfStmt, boundary, chained bool) []guard {
+func guardsOfIf(dir, p string, fset *token.FileSet, src []byte, ifs *ast.IfStmt, boundary, chained, all bool) []guard {
 	// ⛔ The last statement, or nil for an empty body — and the nil is the point.
 	// This used to read `len(List) == 0 || len(List) > 3` followed by an index of
 	// `len-1`, which made the emptiness check a refusal NO TEST COULD HOLD: delete
@@ -383,14 +443,31 @@ func guardsOfIf(dir, p string, fset *token.FileSet, src []byte, ifs *ast.IfStmt,
 	if n := len(ifs.Body.List); n > 0 {
 		last = ifs.Body.List[n-1]
 	}
-	if len(ifs.Body.List) > 3 {
-		return nil
+	kind := ""
+	refusal := len(ifs.Body.List) <= 3
+	if _, isReturn := last.(*ast.ReturnStmt); refusal && !isReturn {
+		// A loop that skips an element is refusing it (#21): continue and break
+		// are the refusals of an iteration, as return is of a call.
+		if br, isBr := last.(*ast.BranchStmt); all && isBr && (br.Tok == token.CONTINUE || br.Tok == token.BREAK) {
+			kind = "loop"
+		} else {
+			refusal = false
+		}
 	}
-	if _, isReturn := last.(*ast.ReturnStmt); !isReturn {
-		return nil
+	if !refusal {
+		if !all {
+			return nil
+		}
+		kind = "branch"
 	}
 	if boundary {
-		return boundaries(dir, p, fset, string(src), ifs.Cond)
+		gs := boundaries(dir, p, fset, string(src), ifs.Cond)
+		if kind != "" {
+			for i := range gs {
+				gs[i].kind, gs[i].cond = kind, kindOf(kind, gs[i].cond)
+			}
+		}
+		return gs
 	}
 	start := fset.Position(ifs.Pos())
 	end := fset.Position(ifs.End())
@@ -429,7 +506,12 @@ func guardsOfIf(dir, p string, fset *token.FileSet, src []byte, ifs *ast.IfStmt,
 	// Its own test asserted this before the code did — the guard is the else's
 	// body, and what disqualifies deletion is being somebody's else, not having
 	// one.
-	if ifs.Init != nil || ifs.Else != nil || chained {
+	if kind != "" {
+		g.kind, g.cond = kind, kindOf(kind, g.cond)
+	}
+	// A [branch] is not a refusal, so deleting it removes a decision and a
+	// statement list, which says nothing about the condition: only false && (C).
+	if ifs.Init != nil || ifs.Else != nil || chained || kind == "branch" {
 		g.from, g.to = altFrom, altTo
 	} else {
 		g.altFrom, g.altTo = altFrom, altTo
@@ -511,6 +593,55 @@ func boundaries(dir, file string, fset *token.FileSet, src string, cond ast.Expr
 		return true
 	})
 	return out
+}
+
+// returnSites mutates the boolean expressions a return statement hands back:
+// each becomes true and false (#21), or, in boundary mode, has its comparisons
+// moved. Without type information a boolean expression is one that is
+// syntactically a comparison, a && or ||, or a negation.
+func returnSites(dir, file string, fset *token.FileSet, src string, ret *ast.ReturnStmt, boundary bool) []guard {
+	var out []guard
+	for _, e := range ret.Results {
+		if !isBool(e) {
+			continue
+		}
+		if boundary {
+			gs := boundaries(dir, file, fset, src, e)
+			for i := range gs {
+				gs[i].kind, gs[i].cond = "return", kindOf("return", gs[i].cond)
+			}
+			out = append(out, gs...)
+			continue
+		}
+		s, en := fset.Position(e.Pos()), fset.Position(e.End())
+		from, to := unique(src, s.Offset, en.Offset)
+		var c strings.Builder
+		printer.Fprint(&c, fset, e)
+		for _, v := range []string{"true", "false"} {
+			kind := "return=" + v
+			out = append(out, guard{
+				dir: dir, file: file, line: s.Line, kind: kind,
+				cond: kindOf(kind, strings.Join(strings.Fields(c.String()), " ")),
+				from: from, to: to + v,
+			})
+		}
+	}
+	return out
+}
+
+func isBool(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.ParenExpr:
+		return isBool(v.X)
+	case *ast.UnaryExpr:
+		return v.Op == token.NOT
+	case *ast.BinaryExpr:
+		switch v.Op {
+		case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ, token.LAND, token.LOR:
+			return true
+		}
+	}
+	return false
 }
 
 // unique widens a span backwards, a line at a time, until the text it covers

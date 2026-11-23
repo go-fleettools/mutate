@@ -469,6 +469,36 @@ The command that `mutsweep` drives is now `-mutate-bin` (it was `-mutate`, which
 is the kind of mutation). Nothing else about the report changes: the same five
 verdicts, the same baseline before anything is mutated.
 
+### Sites a refusal walk never reaches: `-sites all`
+
+A refusal is an `if` whose body ends in a `return`. Three shapes of guard are
+outside that, and a lane that says "every guard" over a refusal walk gates only
+some of them (go-numerics/special#75):
+
+```console
+$ mutsweep -sites all -files jn_yn_fast.go -- go test ./...
+```
+
+| kind in the report | site | mutation |
+|---|---|---|
+| `[loop]` | an `if` whose body ends in `continue` or `break` (a loop that skips an element refuses it) | deleted, or `false && (C)` when that does not compile |
+| `[branch]` | any other `if`: it assigns, or its body is long | the condition becomes `false && (C)` (deleting would remove a decision, not a guard) |
+| `[return=true]`, `[return=false]` | a boolean return expression: a comparison, `&&`, `\|\|`, a negation | the expression becomes `true`, then `false` |
+
+With `-mutate boundary` the comparisons of `[loop]`, `[branch]` and `[return]`
+sites are moved too. Each site is addressed by its own text, widened until unique,
+so the second of two identical comparisons is a site of its own.
+
+**It is off by default**, and that is a decision, not an omission: the push gate
+and every record count the default walk, so widening it would make every record
+on the machine stale at once. `-tally` prints what the default leaves out
+(`not swept (add -sites all): 2 [branch], 2 [loop], 6 [return=true] ...`), so a
+"covers every guard" claim can be checked against it. A line `-only` names that is
+such a site is no longer called "not there": the error says it is a `[loop]` site
+that `-sites all` visits. A sweep with `-sites all` files its record like any
+other, and an `-only` run counts the walk it visits, so a full record made by an
+older mutsweep is repaired the same way (#30).
+
 ### The taxonomy is not invented here
 
 PIT, the mutation testing tool for Java, has reported these outcomes for years,
