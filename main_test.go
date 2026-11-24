@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,8 +68,12 @@ func TestASecondRestoreWaitsForTheFirstToFinish(t *testing.T) {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
+	// Once: a second write (a restore that ignores applied) must not close the
+	// channel twice -- that panic, in a goroutine, ends the binary and hides the
+	// assertions of every test after it.
+	var enter sync.Once
 	m.write = func(p string, d []byte, perm fs.FileMode) error {
-		close(entered)
+		enter.Do(func() { close(entered) })
 		<-release
 		return atomicwrite.Write(p, d, perm)
 	}
