@@ -164,10 +164,13 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
-	guards, excluded, err := collect(cfg)
+	guards, excluded, generated, err := collectGen(cfg)
 	if err != nil {
 		fmt.Fprintln(stderr, "mutsweep:", err)
 		return 2
+	}
+	for _, g := range generated {
+		fmt.Fprintf(stderr, "mutsweep: skipped (generated): %s\n", g)
 	}
 	if len(excluded) > 0 {
 		// Said rather than skipped quietly. A file the build leaves out is the

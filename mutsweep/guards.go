@@ -240,6 +240,25 @@ func excludedError(dir string, excluded []string) error {
 var readSource = os.ReadFile
 
 func collect(cfg config) ([]guard, []string, error) {
+	g, excluded, _, err := collectGen(cfg)
+	return g, excluded, err
+}
+
+// isGenerated reports whether src carries Go's generated-code marker
+// (https://go.dev/s/generatedcode): a line `// Code generated ... DO NOT EDIT.`
+// before the first non-comment text. It is go/ast.IsGenerated, not a regexp, so the
+// rule is the standard library's -- a marker after the package clause does not count.
+// A file that does not parse is not called generated: the walk reports the error.
+func isGenerated(src []byte) bool {
+	f, err := parser.ParseFile(token.NewFileSet(), "", src, parser.PackageClauseOnly|parser.ParseComments)
+	return err == nil && ast.IsGenerated(f)
+}
+
+// collectGen is collect that also returns the generated files it left out. A
+// directory sweep skips them -- the generator is tested by its own project -- and
+// the caller says so; naming one with -files or -only is an error, because a file
+// swept silently or skipped silently reads as a clean sweep.
+func collectGen(cfg config) ([]guard, []string, []string, error) {
 	paths := cfg.files
 	if len(paths) == 0 && len(cfg.only) > 0 {
 		// The targets name their files, so there is no reason to parse the rest
@@ -257,7 +276,7 @@ func collect(cfg config) ([]guard, []string, error) {
 	if len(paths) == 0 {
 		entries, err := os.ReadDir(cfg.dir)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		for _, e := range entries {
 			n := e.Name()
@@ -274,23 +293,32 @@ func collect(cfg config) ([]guard, []string, error) {
 	// a campaign comes to believe it covered a package it never compiled.
 	paths, excluded, err := partitionByBuild(cfg.dir, paths)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if named && len(excluded) > 0 {
-		return nil, nil, excludedError(cfg.dir, excluded)
+		return nil, nil, nil, excludedError(cfg.dir, excluded)
 	}
 
 	var out []guard
+	var generated []string
 	for _, p := range paths {
 		// Relative to -dir, because the command and mutate both run THERE:
 		// a path that is right for this process is wrong for them.
 		src, err := readSource(filepath.Join(cfg.dir, p))
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
+		}
+		if isGenerated(src) {
+			if named {
+				return nil, nil, nil, fmt.Errorf("%s is generated code (it carries a `// Code generated ... DO NOT EDIT.` line): "+
+					"its generator is tested by its own project and mutsweep does not sweep it", p)
+			}
+			generated = append(generated, p)
+			continue
 		}
 		found, err := guardsInSites(cfg.dir, p, src, cfg.boundary(), cfg.allSites())
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		out = append(out, found...)
 	}
@@ -304,9 +332,9 @@ func collect(cfg config) ([]guard, []string, error) {
 			more, _, _ := collect(all) // the walk just succeeded on the same files
 			kErr = fmt.Errorf("%w; %s", kErr, elsewhere(more, cfg.only))
 		}
-		return g, excluded, kErr
+		return g, excluded, generated, kErr
 	}
-	return out, excluded, nil
+	return out, excluded, generated, nil
 }
 
 // guardsIn finds the refusals in one file's SOURCE, given as bytes rather than
