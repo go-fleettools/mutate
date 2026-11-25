@@ -122,6 +122,16 @@ bcast_lock_js.go, peer_js.go, webrtc_js.go, websocket_js.go
 mutsweep: 245 refusals, 5m0s each at most, through "go test ./..."
 ```
 
+**Generated code is skipped, and named.** A file carrying Go's generated-code
+marker ([go.dev/s/generatedcode](https://go.dev/s/generatedcode): a
+`// Code generated ... DO NOT EDIT.` line before the first non-comment text, decided
+by `go/ast.IsGenerated`) is not swept: no test of the repository that vendors a
+protoc-gen-go file can hold guards in it, and the generator is tested by its own
+project. The default sweep, `-tally` and `-hook` each print
+`skipped (generated): admin.pb.go`. Naming such a file with `-files` or `-only` is an
+error, never a silent sweep or a silent skip. A marker after the `package` clause
+does not make a file generated.
+
 286 before, 245 after, and the 41 accounted for by name rather than by a number
 nobody can check.
 

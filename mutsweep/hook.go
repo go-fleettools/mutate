@@ -221,11 +221,12 @@ var gitOut = func(dir string, args ...string) ([]byte, error) {
 
 // verdictOf is what the gate concluded about one pushed repository.
 type verdictOf struct {
-	root     string
-	refused  map[string][]string // repo-relative file -> why
-	only     map[string][]string // repo-relative file -> the -only targets that clear it
-	panics   []string            // allowed, said
-	unjudged []string            // could not read: allowed, said
+	root      string
+	refused   map[string][]string // repo-relative file -> why
+	only      map[string][]string // repo-relative file -> the -only targets that clear it
+	panics    []string            // allowed, said
+	unjudged  []string            // could not read: allowed, said
+	generated []string            // generated code: skipped, said
 }
 
 // judge reads what a push from dir would send and decides each file.
@@ -327,6 +328,10 @@ func judgeFile(v *verdictOf, base, f string) {
 	src, err := gitOut(v.root, "show", "HEAD:"+f)
 	if err != nil {
 		v.unjudged = append(v.unjudged, f+": "+err.Error())
+		return
+	}
+	if isGenerated(src) {
+		v.generated = append(v.generated, f)
 		return
 	}
 	d, name := filepath.Join(v.root, filepath.Dir(f)), filepath.Base(f)
@@ -496,6 +501,9 @@ func hookMain(in io.Reader, stdout, stderr io.Writer) int {
 		}
 		for _, u := range v.unjudged {
 			said = append(said, "NOT JUDGED "+u)
+		}
+		for _, g := range v.generated {
+			said = append(said, "skipped (generated): "+g)
 		}
 		if len(v.refused) == 0 {
 			continue
