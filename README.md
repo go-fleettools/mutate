@@ -546,6 +546,13 @@ is the tool's own suite — **10,837 processes and a load average of 532**
 before it was noticed. The refusal travels in the environment, because the
 recursion is about the *command*, not about a directory.
 
+**Start in a tree holding a stale temp file.** Restoring a mutated file writes
+a `.<name>.atomicwrite-<n>` temp file beside it and renames it over the
+original. A sweep killed between the two leaves that file in your tree, where
+`git add -A` commits it (go-fde/veracrypt v0.8.0 shipped one). A sweep now
+looks under `-dir` and `-run-in` (not `.git`) before touching anything, names
+every such file and exits 2; delete them and run again.
+
 **Report a guard it could not address.** Two guards in one file often have
 identical text, and `mutate` rightly refuses an ambiguous replacement. Each
 deletion is widened with preceding source until it occurs exactly once —
