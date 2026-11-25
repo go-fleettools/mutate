@@ -56,6 +56,10 @@ const marginOverBaseline = 3
 
 // sweep deletes each guard in turn and reports what the suite did about it.
 func sweep(cfg config, guards []guard, cmd []string, stdout, stderr io.Writer) int {
+	if err := refuseStale(cfg); err != nil {
+		fmt.Fprintln(stderr, "mutsweep:", err)
+		return 2
+	}
 	if err := supportsEcho(cfg.mutate); err != nil {
 		fmt.Fprintln(stderr, "mutsweep:", err)
 		return 2
