@@ -81,7 +81,7 @@ func toolchainCouldHaveWritten(line string) bool {
 	if strings.HasPrefix(line, "{") {
 		return strings.Contains(line, `"Action":"build-output"`) || strings.Contains(line, `"Action":"build-fail"`)
 	}
-	if line[0] == ' ' || line[0] == '\t' {
+	if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
 		return false
 	}
 	for _, p := range []string{"---", "===", "ok ", "ok\t", "PASS", "FAIL", "panic:", "goroutine "} {
