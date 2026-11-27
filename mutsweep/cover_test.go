@@ -736,7 +736,7 @@ func main() {
 // with its last line as the note.
 func TestAnUnknownExitStatusIsNotAMutantAndSaysWhatItSaid(t *testing.T) {
 	bin := stubMutate(t)
-	t.Setenv("STUB_EXIT", "3")
+	t.Setenv("STUB_EXIT", "7") // 3 and 4 are mutate's "the machine failed" (environ.go)
 	t.Setenv("STUB_OUT", "something unexpected\n")
 	dir := t.TempDir()
 	write(t, dir, "x.go", oneGuard)

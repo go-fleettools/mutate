@@ -52,7 +52,7 @@ func TestARestoreOfAnUnappliedMutationWritesNothing(t *testing.T) {
 	}
 	writes := 0
 	m.write = func(string, []byte, fs.FileMode) error { writes++; return nil }
-	noPanic(t, "restore before apply", m.restore)
+	noPanic(t, "restore before apply", func() { _ = m.restore() })
 	if writes != 0 {
 		t.Errorf("restore of a mutation never applied wrote %d time(s), want 0", writes)
 	}

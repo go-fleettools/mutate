@@ -86,13 +86,19 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	go func() { <-sig; m.restore(); os.Exit(130) }()
 
 	if err := m.apply(); err != nil {
-		fmt.Fprintln(stderr, "mutate:", err)
-		return 2
+		// 3, not 2: 2 is "this mutation is the wrong shape", a statement about
+		// the mutation. A write that failed (a full disk) is about the machine, and
+		// mutsweep read it as "not a mutant" for 414 mutants on 2026-11-27.
+		fmt.Fprintln(stderr, "mutate: ENVIRONMENT FAILURE, the mutation was not applied:", err)
+		return exitEnvironment
 	}
 
 	c := exec.Command(cmd[0], cmd[1:]...)
 	out, runErr := c.CombinedOutput()
-	m.restore()
+	if err := m.restore(); err != nil {
+		// 4: the file still holds the mutation, whatever the command said.
+		return exitRestore
+	}
 
 	// A mutant that does not COMPILE is not a failing test, it is no test
 	// at all — and in a grep for FAIL the two look the same. Told apart
@@ -184,8 +190,12 @@ func newMutation(path, from, to, name string, stderr io.Writer) (*mutation, erro
 		// one being described, and the report would name the small one.
 		return nil, fmt.Errorf("%s: the text to replace appears %d times — make it unique", path, n)
 	}
-	return &mutation{path: path, from: from, to: to, name: name, original: b, stderr: stderr, write: atomicwrite.Write}, nil
+	return &mutation{path: path, from: from, to: to, name: name, original: b, stderr: stderr, write: writeFile}, nil
 }
+
+// writeFile is how a mutation and its restore reach the disk. A variable so a test
+// can make a write fail the way a full disk does.
+var writeFile = atomicwrite.Write
 
 func (m *mutation) label() string {
 	if m.name != "" {
@@ -209,18 +219,28 @@ func (m *mutation) apply() error {
 	return nil
 }
 
-func (m *mutation) restore() {
+// Exit codes that say the MACHINE failed, apart from 1 (the suite survived) and
+// 2 (the mutation or the command line is wrong). mutsweep reads them.
+const (
+	exitEnvironment = 3 // the mutation could not be written
+	exitRestore     = 4 // the file could not be put back and still holds the mutation
+)
+
+func (m *mutation) restore() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.applied {
-		return
+		return nil
 	}
 	m.applied = false
 	if err := m.write(m.path, m.original, sourcePerm); err != nil {
 		// Said as loudly as possible: the tree now holds a deliberate
 		// defect and the next commit would carry it.
 		fmt.Fprintf(m.stderr, "mutate: COULD NOT RESTORE %s: %v\n", m.path, err)
+		fmt.Fprintf(m.stderr, "mutate: LEFT MUTATED: %s\n", m.path)
+		return err
 	}
+	return nil
 }
 
 // compilerSays are phrases the Go toolchain prints when a package will not

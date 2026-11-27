@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -116,8 +117,8 @@ func TestAMutationThatCannotBeWrittenIsRefused(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	code, out, errb := runMutate(t, "-file", path, "-from", "keep", "-to", "drop", "--", "true")
-	if code != 2 {
-		t.Fatalf("exit %d, want 2 (refused)\nstdout: %q\nstderr: %q", code, out, errb)
+	if code != exitEnvironment {
+		t.Fatalf("exit %d, want %d (the machine failed)\nstdout: %q\nstderr: %q", code, exitEnvironment, out, errb)
 	}
 	if !strings.Contains(errb, "mutate:") {
 		t.Errorf("stderr does not say who refused: %q", errb)
@@ -128,6 +129,54 @@ func TestAMutationThatCannotBeWrittenIsRefused(t *testing.T) {
 	}
 	if string(after) != original {
 		t.Errorf("the file reads %q, want the original back", after)
+	}
+}
+
+// ⛔ A FULL DISK, injected through the write seam, on either write.
+//
+// 2026-11-27: the write that applies a mutation failed with ENOSPC and mutate
+// exited 2 -- "the mutation is the wrong shape" -- which mutsweep filed as "not a
+// mutant" for 414 mutants; the write that RESTORES failed too, and four source
+// files were left with their guards deleted. The first is exit 3, the second 4,
+// and neither is ever 1 or 2.
+func TestAFullDiskIsTheMachinesFailureNotTheMutations(t *testing.T) {
+	full := &fs.PathError{Op: "write", Path: "g.go", Err: syscall.ENOSPC}
+	for _, tt := range []struct {
+		name     string
+		failOn   int // which write (1 = the mutation, 2 = the restore) fails
+		wantCode int
+		wantErr  string
+		wantFile string
+	}{
+		{"mutation", 1, exitEnvironment, "ENVIRONMENT FAILURE", "keep me\n"},
+		{"restore", 2, exitRestore, "LEFT MUTATED", "drop me\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := write(t, t.TempDir(), "g.go", "keep me\n")
+			calls := 0
+			old := writeFile
+			t.Cleanup(func() { writeFile = old })
+			writeFile = func(p string, d []byte, perm fs.FileMode) error {
+				calls++
+				if calls == tt.failOn {
+					return full
+				}
+				return atomicwrite.Write(p, d, perm)
+			}
+			code, out, errb := runMutate(t, "-file", path, "-from", "keep", "-to", "drop", "--", "true")
+			if code != tt.wantCode {
+				t.Fatalf("exit %d, want %d\nstdout: %q\nstderr: %q", code, tt.wantCode, out, errb)
+			}
+			if !strings.Contains(errb, tt.wantErr) || !strings.Contains(errb, "no space left on device") {
+				t.Errorf("stderr does not name the cause: %q", errb)
+			}
+			if tt.failOn == 2 && !strings.Contains(errb, path) {
+				t.Errorf("stderr does not name the file left mutated: %q", errb)
+			}
+			if b, _ := os.ReadFile(path); string(b) != tt.wantFile {
+				t.Errorf("the file holds %q, want %q", b, tt.wantFile)
+			}
+		})
 	}
 }
 

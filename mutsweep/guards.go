@@ -27,6 +27,9 @@ type config struct {
 	tally   bool   // count per file and stop, running nothing
 	mode    string // what to do to each refusal: modeDelete (the default) or modeBoundary
 	sites   string // which sites to visit: sitesRefusals (the default) or sitesAll
+	// minFreeMB: refuse to start, and stop, when the disk has less free than this.
+	// 0 (the zero value, so a hand-built config) turns the check off.
+	minFreeMB int
 }
 
 const (
@@ -107,6 +110,10 @@ func parse(argv []string, stderr io.Writer) (config, []string, int) {
 		"refusal in the package. A target matching no refusal is an error, because a\n"+
 		"sweep that quietly swept nothing reads as a clean one")
 	fs.DurationVar(&cfg.timeout, "timeout", 5*time.Minute, "how long one mutant may run before it is called HUNG")
+	fs.IntVar(&cfg.minFreeMB, "min-free-mb", 1024, "stop, before each mutant, when the file system of the run directory or\n"+
+		"of the temporary directory has fewer than this many MiB free (0 turns it off).\n"+
+		"A full disk makes the build fail, and a build that fails reads as a mutant that\n"+
+		"does not compile")
 	fs.StringVar(&cfg.mutate, "mutate-bin", "mutate", "the mutate command to drive")
 	fs.StringVar(&cfg.mode, "mutate", modeDelete, "what to do to each refusal: `delete` it (the default), or\n"+
 		"`boundary`: move each comparison in a refusal's condition, and in a for\n"+

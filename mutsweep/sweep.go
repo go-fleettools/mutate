@@ -76,12 +76,28 @@ func sweep(cfg config, guards []guard, cmd []string, stdout, stderr io.Writer) i
 	}
 	fmt.Fprintf(stdout, "mutsweep: a red suite is read from %s, to tell an assertion from a panic\n", method)
 
+	if err := checkFreeSpace(cfg); err != nil {
+		fmt.Fprintln(stderr, "mutsweep:", err)
+		return exitEnvironment
+	}
+	snap := takeSnapshot(cfg, guards)
+
 	results := make([]result, 0, len(guards))
 	for i, g := range guards {
-		r := one(cfg, g, cmd)
-		results = append(results, r)
+		var r result
+		// Before each mutant: the disk filled in the MIDDLE of a sweep, at #72 of 493.
+		if err := checkFreeSpace(cfg); err != nil {
+			r = result{guard: g, verdict: envFail, note: err.Error()}
+		} else {
+			r = one(cfg, g, cmd)
+		}
 		fmt.Fprintf(stdout, "[%d/%d] %-12s %s:%d  %s  %s\n",
 			i+1, len(guards), r.verdict, g.file, g.line, trim(g.cond, 60), r.note)
+		if r.verdict == envFail || r.verdict == restoreFail {
+			// Never "not a mutant", never on to the next one, never a record.
+			return abort(r, i+1, len(guards), snap, stderr)
+		}
+		results = append(results, r)
 	}
 	code = report(results, cfg.timeout, stdout, stderr)
 	// Only a DELETE-mode sweep is filed: the push gate asks whether each refusal
@@ -264,6 +280,11 @@ func oneMutation(cfg config, g guard, cmd []string) result {
 	// politely enough to restore the file itself and this ran for real.
 	path := filepath.Join(runIn, g.pathFrom(runIn))
 	before, readErr := os.ReadFile(path)
+	if readErr != nil {
+		// Nothing to put back would be nothing to compare with: do not mutate a
+		// file this tool cannot read. Not "not a mutant" -- a statement about the machine.
+		return result{guard: g, verdict: envFail, note: fmt.Sprintf("cannot read %s: %v", path, readErr)}
+	}
 
 	start := time.Now()
 	c := exec.Command(cfg.mutate, argv...)
@@ -278,18 +299,40 @@ func oneMutation(cfg config, g guard, cmd []string) result {
 	took := time.Since(start)
 
 	r := result{guard: g, took: took}
+
+	// The file must be back, whatever happened. mutate restores it, and depending on
+	// another process having managed that is a hope: the window where a source file
+	// holds a deliberate defect must not outlive the sweep -- and a restore that
+	// failed stops the sweep (restoreFail), it is never one note among others.
+	restoreErr := ensureRestored(path, before, readErr)
+	var rf *restoreFailure
+	if errors.As(restoreErr, &rf) {
+		return result{guard: g, took: took, verdict: restoreFail, note: rf.Error()}
+	}
+	if exitCode(err) == mutateRestore {
+		return result{guard: g, took: took, verdict: restoreFail,
+			note: "mutate could not put " + path + " back: " + trim(strings.TrimSpace(lastLine(string(out))), 100)}
+	}
+	// What the machine says, before what the command says: an ENOSPC in a build is
+	// no statement about the guard.
+	if ctx.Err() == nil {
+		if exitCode(err) == mutateEnvironment {
+			return result{guard: g, took: took, verdict: envFail,
+				note: "mutate could not apply the mutation: " + trim(strings.TrimSpace(lastLine(string(out))), 100)}
+		}
+		if cause := environmentCause(string(out)); cause != "" {
+			return result{guard: g, took: took, verdict: envFail, note: cause}
+		}
+	}
+
 	switch {
 	case ctx.Err() != nil:
 		// Not survived: the guard is load-bearing, since the suite cannot
 		// finish without it. Not caught either, because nothing SAYS so -- a
 		// timeout names no cause and costs a runner its whole budget.
 		r.verdict, r.note = hung, fmt.Sprintf("no answer in %v", cfg.timeout)
-		// And the file must be back. mutate restores it when asked to stop, and
-		// depending on another process having managed that is a hope: the
-		// window where a source file holds a deliberate defect must not outlive
-		// the sweep.
-		if err := ensureRestored(path, before, readErr); err != nil {
-			r.note += "; " + err.Error()
+		if restoreErr != nil {
+			r.note += "; " + restoreErr.Error()
 		}
 	case err == nil:
 		var by how
@@ -323,6 +366,9 @@ func oneMutation(cfg config, g guard, cmd []string) result {
 		r.verdict, r.note = unrun, fmt.Sprintf("could not run %q: %v", cfg.mutate, err)
 	default:
 		r.verdict, r.note = noBuild, trim(strings.TrimSpace(lastLine(string(out))), 70)
+	}
+	if restoreErr != nil && r.verdict != hung {
+		r.note += "; " + restoreErr.Error()
 	}
 	return r
 }
@@ -458,11 +504,11 @@ func runBounded(ctx context.Context, c *exec.Cmd) ([]byte, error) {
 // wherever the empty string is first "found", which is offset zero.
 func ensureRestored(path string, before []byte, readErr error) error {
 	if readErr != nil {
-		return fmt.Errorf("RESTORE IMPOSSIBLE: %s was never read: %v", path, readErr)
+		return &restoreFailure{path, fmt.Sprintf("RESTORE IMPOSSIBLE: %s was never read: %v", path, readErr)}
 	}
 	now, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("RESTORE IMPOSSIBLE: cannot read %s: %v", path, err)
+		return &restoreFailure{path, fmt.Sprintf("RESTORE IMPOSSIBLE: cannot read %s: %v", path, err)}
 	}
 	if bytes.Equal(now, before) {
 		return nil
@@ -475,7 +521,7 @@ func ensureRestored(path string, before []byte, readErr error) error {
 	// The perm is a fallback for a file that is not there, which this path has
 	// just read: atomicwrite keeps the mode the file has.
 	if err := atomicwrite.Write(path, before, 0o644); err != nil {
-		return fmt.Errorf("RESTORE FAILED for %s: %w", path, err)
+		return &restoreFailure{path, fmt.Sprintf("RESTORE FAILED for %s: %v", path, err)}
 	}
 	return fmt.Errorf("the mutation outlived mutate and was put back here")
 }
