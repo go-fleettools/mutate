@@ -33,6 +33,42 @@ func TestEnvironmentCauseReadsTheToolchainAndNotTheTests(t *testing.T) {
 	}
 }
 
+// Every test marker, UNINDENTED, still means "a test said it": the sign after it is
+// no statement about the machine. And an empty line is not a line to index.
+func TestATestMarkerLineIsNeverTheToolchain(t *testing.T) {
+	for _, line := range []string{
+		"--- FAIL: TestFull: no space left on device",
+		"=== RUN   TestFull no space left on device",
+		"ok  \tx no space left on device",
+		"ok\tx no space left on device",
+		"PASS no space left on device",
+		"FAIL x no space left on device",
+		"panic: no space left on device",
+		"goroutine 7 [running]: no space left on device",
+	} {
+		if got := environmentCause(line + "\n"); got != "" {
+			t.Errorf("%q read as the machine failing: %q", line, got)
+		}
+	}
+	for _, line := range []string{"", "\r"} {
+		if toolchainCouldHaveWritten(line) {
+			t.Errorf("%q is not a line the toolchain wrote", line)
+		}
+	}
+	if environmentCause("\n\nno space left on device\n") == "" {
+		t.Error("a blank line hid the line after it")
+	}
+}
+
+func TestRunDirIsTheRunInOrElseTheDir(t *testing.T) {
+	if got := (config{dir: "d", runIn: "r"}).runDir(); got != "r" {
+		t.Errorf("runDir = %q, want r", got)
+	}
+	if got := (config{dir: "d"}).runDir(); got != "d" {
+		t.Errorf("runDir = %q, want d", got)
+	}
+}
+
 // A stand-in mutate that fails the way a full disk makes it fail. Mode comes from
 // STANDIN_MODE, every call is counted in STANDIN_COUNT, and it applies the
 // replacement before it fails when it has to leave the file mutated.
@@ -70,7 +106,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "mutate: atomicwrite x.go: open ./.x.go.atomicwrite-123: no space left on device")
 		os.Exit(2)
 	case "apply-fail":
-		fmt.Fprintln(os.Stderr, "mutate: ENVIRONMENT FAILURE, the mutation was not applied: write x.go: input/output error")
+		fmt.Fprintln(os.Stderr, "mutate: ENVIRONMENT FAILURE, the mutation was not applied: write x.go: permission denied")
 		os.Exit(3)
 	case "restore-fail", "restore-fail-repairable":
 		b, _ := os.ReadFile(*file)
@@ -174,7 +210,8 @@ func TestAnEnvironmentFailureStopsTheSweepAndIsNeverNotAMutant(t *testing.T) {
 	}{
 		{"compile-enospc", "no space left on device", exitEnvironment},
 		{"atomicwrite", "no space left on device", exitEnvironment},
-		{"apply-fail", "input/output error", exitEnvironment},
+		// No environment word in it: only mutate's exit status says the machine failed.
+		{"apply-fail", "could not apply the mutation: mutate: ENVIRONMENT FAILURE", exitEnvironment},
 	} {
 		t.Run(tt.mode, func(t *testing.T) {
 			cfg, count := fixture(t, tt.mode)
@@ -319,9 +356,13 @@ func TestAFullDiskIsRefusedBeforeAndBetweenMutants(t *testing.T) {
 		cfg, count := fixture(t, "")
 		cfg.minFreeMB = 1024
 		freeBytes = func(string) (uint64, error) { return 100 << 20, nil }
-		code, _, errb := sweepAll(t, cfg)
+		code, out, errb := sweepAll(t, cfg)
 		if code != exitEnvironment || calls(t, count) != 0 {
 			t.Fatalf("exit %d after %d runs, want %d after none\n%s", code, calls(t, count), exitEnvironment, errb)
+		}
+		// Refused BEFORE the sweep starts, not stopped inside it.
+		if strings.Contains(errb, "STOPPED") || strings.Contains(out, "[1/2]") {
+			t.Errorf("it started the sweep before refusing:\n%s\n%s", out, errb)
 		}
 		if !strings.Contains(errb, "100 MiB free") || !strings.Contains(errb, "1024 MiB") {
 			t.Errorf("the refusal does not state the measure and the threshold:\n%s", errb)
@@ -348,9 +389,10 @@ func TestAFullDiskIsRefusedBeforeAndBetweenMutants(t *testing.T) {
 	t.Run("off, and unknown is not full", func(t *testing.T) {
 		cfg, _ := fixture(t, "")
 		cfg.minFreeMB = 0
-		freeBytes = func(string) (uint64, error) { return 0, nil }
-		if err := checkFreeSpace(cfg); err != nil {
-			t.Errorf("0 must turn the check off: %v", err)
+		asked := 0
+		freeBytes = func(string) (uint64, error) { asked++; return 0, nil }
+		if err := checkFreeSpace(cfg); err != nil || asked != 0 {
+			t.Errorf("0 must turn the check off, and not even ask: %v, asked %d times", err, asked)
 		}
 		cfg.minFreeMB = 1024
 		freeBytes = func(string) (uint64, error) { return 0, os.ErrInvalid }
