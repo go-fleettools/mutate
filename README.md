@@ -229,6 +229,26 @@ The baseline costs one run of the command, against one per guard.
 exit status: it is **non-zero** when anything survived, hung, or was caught only
 by a panic, so a sweep can stand as a CI gate.
 
+#### When the machine fails, there is no verdict
+
+A full disk is not a mutant that does not compile. On 2026-11-27 a go-crdt/collab
+sweep ran out of disk at mutant 72 of 493: the build cache could not be written,
+414 mutants were reported "not a mutant", and four source files were left with
+their guards deleted because every restore failed too. Now:
+
+- an I/O failure (mutate exits **3** when it cannot write the mutation), or a
+  build whose output says the *environment* failed (`no space left on device`,
+  `disk quota exceeded`, `read-only file system`, `input/output error`, `too many
+  open files`, on a line the toolchain wrote, not a test), is never "not a
+  mutant": the sweep **stops**, names the cause, files no record, and exits **3**;
+- a restore that failed (mutate exits **4**, or the file does not hold its
+  original bytes afterwards) stops the sweep at once, exits **4**, and prints
+  `LEFT MUTATED: <file>` for every file that no longer holds the bytes it had at
+  the start;
+- before each mutant, `-min-free-mb` (default 1024, 0 turns it off) refuses a file
+  system, the run directory's or the temporary directory's, with less free than
+  that. A platform that cannot say (Windows) is "unknown", not "full".
+
 `HUNG` is not a theoretical category. Deleting the check that a retry policy
 is honourable does not fail a suite; it makes the suite wait out an hour
 somebody mistyped into the wrong field.
