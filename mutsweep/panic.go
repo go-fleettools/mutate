@@ -166,7 +166,7 @@ func decide(lines []outLine, passed map[testKey]bool) verdict {
 func panicked(lines []outLine, passed map[testKey]bool) (tainted map[testKey]bool, killed map[string]bool, found bool) {
 	tainted, killed = map[testKey]bool{}, map[string]bool{}
 	for i, l := range lines {
-		if !strings.Contains(l.text, "panic:") || passed[testKey{l.pkg, l.test}] {
+		if !strings.Contains(l.text, "panic:") || passed[testKey{l.pkg, l.test}] || assertionLine.MatchString(l.text) {
 			continue
 		}
 		// ⛔ An ASSERTION LINE is never the start of a panic, whatever its message
